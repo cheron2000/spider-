@@ -67,7 +67,11 @@ def check_prerequisites() -> None:
     models = [m.get("name", "") for m in response.json().get("models", [])]
     if not any(m == MODEL or m.startswith(MODEL + ":") for m in models):
         raise SystemExit(f"Ollama model '{MODEL}' is not installed. Run: ollama pull {MODEL}")
-    run(["git", "status", "--short"], REPO_PATH)
+    dirty = run(["git", "status", "--porcelain"], REPO_PATH).stdout.strip()
+    if dirty:
+        raise SystemExit(
+            "AGENT_REPO_PATH must be a clean disposable clone. Uncommitted files detected:\\n" + dirty
+        )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
 

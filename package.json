@@ -1,0 +1,27 @@
+{
+  "name": "universal-agent-framework",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/dashboard"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "node --watch services/api/src/index.js",
+    "dev:web": "npm --workspace apps/dashboard run dev",
+    "build": "npm --workspace apps/dashboard run build",
+    "start": "node services/api/src/index.js"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

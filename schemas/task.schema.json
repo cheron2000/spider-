@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Task",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "todo",
+        "in_progress",
+        "blocked",
+        "review",
+        "done",
+        "cancelled"
+      ]
+    },
+    "parentId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assigneeAgent": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "priority": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

@@ -15,5 +15,9 @@ This repository is the framework template, not an individual project created fro
 ## Safety / maturity
 This is an MVP scaffold. The planner is deterministic, not an LLM planner; task/agent telemetry is in memory; remote execution is a protocol only, not a sandbox. Before production use, add authentication, durable storage/leases, rate limits, audit logs, approval gates, and isolated worker execution. Never commit `.env` or credentials.
 
+## Free local coding agents on Windows
+
+See [`agents/LOCAL_SETUP_WINDOWS.md`](agents/LOCAL_SETUP_WINDOWS.md) for Ollama + Aider setup and [`agents/local_coding_worker.py`](agents/local_coding_worker.py) for the local worker. The worker creates isolated Git worktrees and never pushes or merges automatically. Automatic approval is powerful and risky; use only a disposable clone without secrets.
+
 ## GitHub template
 After the initial implementation is reviewed, enable **Settings → General → Template repository**. Each project created from the template should have its own issues, credentials, branches, and configuration.

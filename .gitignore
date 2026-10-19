@@ -4,3 +4,7 @@ apps/dashboard/dist/
 *.log
 __pycache__/
 .venv/
+services/api/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

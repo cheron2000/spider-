@@ -121,6 +121,24 @@ function handleProviderStateChange(runtime){
 
 function ensureProviderAgents(){
  const now=new Date().toISOString();
+ // Older databases may have assigned these indices to generic workers before
+ // provider slots became reserved. Move unrelated occupants instead of silently
+ // turning their identities into a different provider.
+ let nextExtraSlot=Math.max(PROVIDER_SLOTS.length-1,...[...agents.values()].map(agent=>Number.isInteger(agent.slotIndex)?agent.slotIndex:-1))+1;
+ for(const agent of [...agents.values()]){
+  if(agent.slotIndex<0||agent.slotIndex>=PROVIDER_SLOTS.length)continue;
+  const slot=PROVIDER_SLOTS[agent.slotIndex];
+  const matchesSlot=agent.id==='provider-'+slot.id
+   ||agent.slotId===slot.id
+   ||slot.aliases.some(alias=>normalizedAgentName(agent.name)===normalizedAgentName(alias));
+  if(!matchesSlot){
+   agent.slotIndex=nextExtraSlot;
+   agent.slotId='agent-'+(nextExtraSlot+1);
+   agent.slotLabel='Agent '+(nextExtraSlot+1);
+   nextExtraSlot++;
+   agentStore.save(agent);
+  }
+ }
  for(const [slotIndex,slot] of PROVIDER_SLOTS.entries()){
   let agent=[...agents.values()].find(item=>item.slotIndex===slotIndex);
   const adapter=providerRuntime.adapter(slot.id);

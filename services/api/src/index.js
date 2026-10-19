@@ -153,12 +153,14 @@ app.get('/api/agents/:id/messages',requireMessageAgent,(req,res)=>{
  if(req.params.id!==req.spiderAgent.id)return res.status(403).json({error:'Agents may only read their own inbox.'});
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
  const messages=messageStore.inbox(req.spiderAgent.id,limit);
- rSafeEventMessages(messages);
+ emitMessageDeliveryEvents(messages);
  res.json({messages});
 });
-function rSafeEventMessages(messages){
+function emitMessageDeliveryEvents(messages){
  for(const message of messages){
-  emit('agent.message.delivered',{id:message.id,taskId:message.taskId,fromAgent:message.fromAgent,toAgent:message.toAgent,kind:message.kind,deliveredAt:message.deliveredAt});
+  const fromName=agents.get(message.fromAgent)?.name||message.fromAgent;
+  const toName=agents.get(message.toAgent)?.name||message.toAgent;
+  emit('agent.message.delivered',{id:message.id,taskId:message.taskId,fromAgent:message.fromAgent,toAgent:message.toAgent,kind:message.kind,title:fromName+' → '+toName+' · delivered',deliveredAt:message.deliveredAt});
  }
 }
 app.post('/api/messages/:id/ack',requireMessageAgent,(req,res)=>{
@@ -168,7 +170,7 @@ app.post('/api/messages/:id/ack',requireMessageAgent,(req,res)=>{
  const message=messageStore.acknowledge(existing.id,req.spiderAgent.id);
  if(!message&&existing.status!=='acknowledged')return res.status(409).json({error:'Message is not in an acknowledgeable state.'});
  const acknowledged=message||existing;
- emit('agent.message.acknowledged',{id:acknowledged.id,taskId:acknowledged.taskId,fromAgent:acknowledged.fromAgent,toAgent:acknowledged.toAgent,kind:acknowledged.kind,acknowledgedAt:acknowledged.acknowledgedAt});
+ emit('agent.message.acknowledged',{id:acknowledged.id,taskId:acknowledged.taskId,fromAgent:acknowledged.fromAgent,toAgent:acknowledged.toAgent,kind:acknowledged.kind,title:(agents.get(acknowledged.fromAgent)?.name||acknowledged.fromAgent)+' → '+(agents.get(acknowledged.toAgent)?.name||acknowledged.toAgent)+' · acknowledged',acknowledgedAt:acknowledged.acknowledgedAt});
  res.json({message:acknowledged});
 });
 app.post('/api/agents/register',(req,res)=>{

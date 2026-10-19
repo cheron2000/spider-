@@ -39,6 +39,12 @@ function requireMessageAgent(req,res,next){
  req.spiderAgent=agent;
  next();
 }
+function requireCoordinator(req,res,next){
+ const expected=process.env.SPIDER_COORDINATOR_API_KEY;
+ if(!expected)return res.status(503).json({error:'Coordinator actions are disabled until SPIDER_COORDINATOR_API_KEY is configured.'});
+ if(!secureEqual(req.get('x-spider-coordinator-key')||'',expected))return res.status(401).json({error:'Invalid coordinator API key.'});
+ next();
+}
 function issueTask(i){const labels=(i.labels||[]).map(x=>typeof x==='string'?x:x.name);return{id:'issue-'+i.number,number:i.number,title:i.title,body:i.body||'',url:i.html_url,state:i.state,status:i.state==='closed'?'done':labels.find(x=>x.startsWith('status:'))?.slice(7)||'todo',labels,assigneeAgent:labels.find(x=>x.startsWith('agent:'))?.slice(6)||null,priority:labels.find(x=>x.startsWith('priority:'))?.slice(9)||'medium',updatedAt:i.updated_at};}
 function githubRequired(_q,r,next){if(!octokit||!owner||!repo)return r.status(503).json({error:'Set GITHUB_TOKEN and GITHUB_REPOSITORY in .env.'});next();}
 async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});for(const i of issues)if(!i.pull_request)tasks.set('issue-'+i.number,issueTask(i));emit('github.synced',{repository:owner+'/'+repo,count:tasks.size});return [...tasks.values()];}

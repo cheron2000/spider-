@@ -50,14 +50,13 @@ function assignAgentSlot(id,name){
  if(existing?.slotIndex!==undefined)return {slotIndex:existing.slotIndex,slotId:existing.slotId,slotLabel:existing.slotLabel};
  const identity=normalizedAgentName(id+' '+name);
  const known=PROVIDER_SLOTS.findIndex(slot=>slot.aliases.some(alias=>identity.includes(normalizedAgentName(alias))));
- if(known>=0){
-  const occupied=[...agents.values()].some(a=>a.id!==id&&a.slotIndex===known);
-  if(!occupied)return {slotIndex:known,slotId:PROVIDER_SLOTS[known].id,slotLabel:PROVIDER_SLOTS[known].label};
- }
  const occupied=new Set([...agents.values()].filter(a=>a.id!==id).map(a=>a.slotIndex));
- let slotIndex=0;while(occupied.has(slotIndex))slotIndex++;
- const slot=PROVIDER_SLOTS[slotIndex];
- return {slotIndex,slotId:slot?.id||('agent-'+(slotIndex+1)),slotLabel:slot?.label||('Agent '+(slotIndex+1))};
+ if(known>=0&&!occupied.has(known))return {slotIndex:known,slotId:PROVIDER_SLOTS[known].id,slotLabel:PROVIDER_SLOTS[known].label};
+ // Reserve the six named provider slots even when their adapters are offline.
+ // Unrecognized agents and duplicate provider instances receive additional slots.
+ let slotIndex=PROVIDER_SLOTS.length;
+ while(occupied.has(slotIndex))slotIndex++;
+ return {slotIndex,slotId:'agent-'+(slotIndex+1),slotLabel:'Agent '+(slotIndex+1)};
 }
 app.get('/api/topology',(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));

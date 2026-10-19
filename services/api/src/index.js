@@ -36,7 +36,42 @@ app.post('/api/ceo/plan',githubRequired,async(req,res)=>{
  emit('ceo.planning.completed',{root,taskCount:children.length});res.status(201).json({root,tasks:children,note:'Deterministic starter plan; review before autonomous execution.'});
  }catch(e){res.status(502).json({error:e.message});}
 });
-app.post('/api/agents/register',(req,res)=>{const p=z.object({id:z.string().min(2).max(100),name:z.string().min(1).max(100),runtime:z.enum(['local','remote']),capabilities:z.array(z.string()).default([]),maxConcurrentTasks:z.number().int().min(1).max(20).default(1)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:p.error.flatten()});const a={...p.data,status:'available',currentTasks:[],registeredAt:new Date().toISOString(),lastHeartbeat:new Date().toISOString()};agents.set(a.id,a);emit('agent.registered',a);res.status(201).json({agent:a});});
+const PROVIDER_SLOTS = [
+ {id:'antigravity',label:'Antigravity',aliases:['antigravity']},
+ {id:'codex',label:'Codex',aliases:['codex','openai codex']},
+ {id:'copilot',label:'Copilot',aliases:['copilot','github copilot']},
+ {id:'kiro',label:'Kiro',aliases:['kiro']},
+ {id:'manus',label:'Manus',aliases:['manus']},
+ {id:'replit',label:'Replit',aliases:['replit']},
+];
+function normalizedAgentName(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();}
+function assignAgentSlot(id,name){
+ const existing=agents.get(id);
+ if(existing?.slotIndex!==undefined)return {slotIndex:existing.slotIndex,slotId:existing.slotId,slotLabel:existing.slotLabel};
+ const identity=normalizedAgentName(id+' '+name);
+ const known=PROVIDER_SLOTS.findIndex(slot=>slot.aliases.some(alias=>identity.includes(normalizedAgentName(alias))));
+ if(known>=0){
+  const occupied=[...agents.values()].some(a=>a.id!==id&&a.slotIndex===known);
+  if(!occupied)return {slotIndex:known,slotId:PROVIDER_SLOTS[known].id,slotLabel:PROVIDER_SLOTS[known].label};
+ }
+ const occupied=new Set([...agents.values()].filter(a=>a.id!==id).map(a=>a.slotIndex));
+ let slotIndex=0;while(occupied.has(slotIndex))slotIndex++;
+ const slot=PROVIDER_SLOTS[slotIndex];
+ return {slotIndex,slotId:slot?.id||('agent-'+(slotIndex+1)),slotLabel:slot?.label||('Agent '+(slotIndex+1))};
+}
+app.get('/api/topology',(_q,r)=>{
+ const registered=[...agents.values()].map(a=>({...a}));
+ const slots=PROVIDER_SLOTS.map((slot,slotIndex)=>({ ...slot,slotIndex,agent:registered.find(a=>a.slotIndex===slotIndex)||null }));
+ const extras=registered.filter(a=>a.slotIndex>=PROVIDER_SLOTS.length).sort((a,b)=>a.slotIndex-b.slotIndex);
+ r.json({coordinator:{id:'spider',label:'Spider'},slots,additionalAgents:extras,peerOffsets:[1,2],registeredCount:registered.length});
+});
+app.post('/api/agents/register',(req,res)=>{
+ const p=z.object({id:z.string().min(2).max(100),name:z.string().min(1).max(100),runtime:z.enum(['local','remote']),capabilities:z.array(z.string().max(100)).max(50).default([]),maxConcurrentTasks:z.number().int().min(1).max(20).default(1)}).safeParse(req.body);
+ if(!p.success)return res.status(400).json({error:p.error.flatten()});
+ const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
+ const a={...prior,...p.data,...slot,status:prior?.status||'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
+ agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
+});
 app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});a.lastHeartbeat=new Date().toISOString();if(req.body?.status)a.status=req.body.status;emit('agent.heartbeat',{id:a.id,status:a.status});res.json({agent:a});});
 app.post('/api/tasks/:id/claim',(req,res)=>{const t=tasks.get(req.params.id),a=agents.get(req.body?.agentId);if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});if(!a)return res.status(400).json({error:'Register agent first.'});if(['done','in_progress'].includes(t.status))return res.status(409).json({error:'Task not claimable',status:t.status});if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';emit('task.claimed',{task:t,agentId:a.id});res.json({task:t,agent:a});});
 app.post('/api/tasks/:id/progress',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});if(t.assigneeAgent&&req.body?.agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.progress={message:String(req.body?.message||'').slice(0,2000),percent:Math.max(0,Math.min(100,Number(req.body?.percent||0))),at:new Date().toISOString()};emit('task.progress',{taskId:t.id,progress:t.progress});res.json({task:t});});

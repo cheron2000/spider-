@@ -1,19 +1,28 @@
-# Universal Agent Framework
+# Spider — multi-agent coordination framework
 
-A GitHub-first starter for coordinating software agents through issues, a task graph dashboard, and local/remote worker protocols.
+Spider coordinates six named agent slots (Antigravity, Codex, Copilot, Kiro, Manus, and Replit) through a central dependency-aware scheduler and a four-neighbor peer topology.
 
-## Status
-This repository is the framework template, not an individual project created from it. GitHub Issues are intended to be the durable task source of truth. The initial scaffold provides a Node.js API, React task-network UI, issue synchronization, a deterministic CEO planning endpoint, and worker registration/progress endpoints.
+## Current capabilities
+
+- SQLite-backed agent registry, message queue, coordination plans, assignments, reports, and peer-review records.
+- Dependency graph validation, bounded retries, recovery of interrupted work, and coordinator-controlled approval before dependent steps are unlocked.
+- Authenticated peer messaging and review routes, with a central coordinator retaining final acceptance authority.
+- A provider-neutral adapter contract and runtime lifecycle. Each provider has an isolated adapter; unavailable providers remain offline and are excluded from scheduling.
+- Direct local CLI adapters for Antigravity, Codex, Copilot, and Kiro; a Manus API adapter; and a configurable authenticated bridge contract for Replit.
+- A React dashboard for the agent topology and activity stream.
 
 ## Quick start
-1. Use Node.js 20+.
+
+1. Use Node.js 20 or newer.
 2. Copy `.env.example` to `.env`.
-3. Set `GITHUB_TOKEN` and `GITHUB_REPOSITORY=owner/repo`.
-4. Run `npm install`, then `npm run dev`.
-5. Open `http://localhost:5173` and use **Demo graph** or **Sync GitHub**.
+3. Install dependencies with `npm install`.
+4. Configure secrets and GitHub settings as needed, then run `npm run dev`.
+5. Open `http://localhost:5173`.
 
-## Safety / maturity
-This is an MVP scaffold. The planner is deterministic, not an LLM planner; task/agent telemetry is in memory; remote execution is a protocol only, not a sandbox. Before production use, add authentication, durable storage/leases, rate limits, audit logs, approval gates, and isolated worker execution. Never commit `.env` or credentials.
+The API starts with provider adapters offline. See [Provider adapters and runtime lifecycle](docs/PROVIDER_ADAPTERS.md) to enable individual integrations, configure isolated workspaces, inspect `GET /api/providers`, and understand the Replit bridge contract.
 
-## GitHub template
-After the initial implementation is reviewed, enable **Settings → General → Template repository**. Each project created from the template should have its own issues, credentials, branches, and configuration.
+## Security and maturity
+
+Provider CLI processes run on the same host/container as the Spider API, and may modify files in their configured workspace. Use a dedicated workspace per provider, keep each provider's native tool permissions restrictive, and isolate the API and worker processes at the OS/container level before multi-tenant use. The adapters do not commit, push, merge, deploy, or release work. A successful execution is submitted for review; it does not approve the result.
+
+Secrets belong in the deployment environment or the provider's native credential store. Do not commit `.env`, place secrets in prompts, or pass broad environment allowlists to provider processes. See the provider guide for details and known boundaries. This is still an evolving framework; do not treat source changes as proof of production readiness.

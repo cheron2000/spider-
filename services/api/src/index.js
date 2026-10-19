@@ -7,6 +7,9 @@ import {Server} from 'socket.io';
 import {Octokit} from '@octokit/rest';
 import {z} from 'zod';
 import {AgentRegistryStore,AgentMessageStore,CoordinationStore} from './agentRegistry.js';
+import {createProviderAdapters} from './providers/index.js';
+import {ProviderRuntimeManager} from './providers/runtime.js';
+import {redactSecrets} from './providers/base.js';
 
 const app=express(),server=createServer(app),origin=process.env.DASHBOARD_ORIGIN||'http://localhost:5173';
 const io=new Server(server,{cors:{origin,methods:['GET','POST']}});
@@ -21,6 +24,11 @@ const coordinationStore=new CoordinationStore();
 const tasks=new Map();
 const agents=new Map(agentStore.list().map(agent=>[agent.id,{...agent,status:'offline',currentTasks:[]}]));
 const events=[];
+const providerRuns=new Set();
+const providerRuntime=new ProviderRuntimeManager(createProviderAdapters(),{
+ onStateChange:handleProviderStateChange,
+ pollIntervalMs:Math.max(10000,Math.min(120000,Number.parseInt(process.env.SPIDER_PROVIDER_POLL_INTERVAL_MS||'30000',10)||30000))
+});
 // Persist offline state after restart while keeping every recorded slot assignment.
 for(const agent of agents.values())agentStore.save(agent);
 function emit(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString()};events.push(e);if(events.length>300)events.shift();io.emit('framework:event',e);}
@@ -50,7 +58,12 @@ function githubRequired(_q,r,next){if(!octokit||!owner||!repo)return r.status(50
 async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});for(const i of issues)if(!i.pull_request)tasks.set('issue-'+i.number,issueTask(i));emit('github.synced',{repository:owner+'/'+repo,count:tasks.size});return [...tasks.values()];}
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
-app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:!!process.env.SPIDER_AGENT_API_KEY,coordinatorEnabled:!!process.env.SPIDER_COORDINATOR_API_KEY,taskCount:tasks.size,agentCount:agents.size}));
+app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:!!process.env.SPIDER_AGENT_API_KEY,coordinatorEnabled:!!process.env.SPIDER_COORDINATOR_API_KEY,taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
+app.get('/api/providers',(_q,r)=>r.json({providers:providerRuntime.list()}));
+app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
+ if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
+ res.json({provider:await providerRuntime.refresh(req.params.id,{reset:true})});
+});
 app.get('/api/tasks',(_q,r)=>r.json({tasks:[...tasks.values()]}));
 app.get('/api/agents',(_q,r)=>r.json({agents:[...agents.values()]}));
 app.get('/api/events',(_q,r)=>r.json({events}));
@@ -73,6 +86,63 @@ const PROVIDER_SLOTS = [
  {id:'manus',label:'Manus',aliases:['manus']},
  {id:'replit',label:'Replit',aliases:['replit']},
 ];
+
+function handleProviderStateChange(runtime){
+ const agent=[...agents.values()].find(item=>item.providerId===runtime.id);
+ if(!agent)return;
+ const previous=agent.providerRuntime||{};
+ agent.providerRuntime={
+  status:runtime.status,reason:runtime.reason||null,checkedAt:runtime.checkedAt||null,
+  authState:runtime.authState||'unknown',activeTasks:runtime.activeTasks||0,
+  maxConcurrentTasks:runtime.maxConcurrentTasks||agent.maxConcurrentTasks
+ };
+ if(['ready','busy'].includes(runtime.status)){
+  agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
+ }else agent.status='offline';
+ if(runtime.checkedAt)agent.lastHeartbeat=runtime.checkedAt;
+ agentStore.save(agent);
+ if(previous.status!==runtime.status||previous.reason!==runtime.reason){
+  emit('provider.runtime.state',{
+   providerId:runtime.id,agentId:agent.id,label:runtime.label,status:runtime.status,
+   reason:runtime.reason||null,authState:runtime.authState||'unknown',
+   activeTasks:runtime.activeTasks||0,maxConcurrentTasks:runtime.maxConcurrentTasks||agent.maxConcurrentTasks,
+   checkedAt:runtime.checkedAt||new Date().toISOString()
+  });
+ }
+ if(['ready','busy'].includes(runtime.status)&&previous.status!==runtime.status){
+  queueMicrotask(()=>advanceOtherCoordinationPlans(null));
+ }
+}
+
+function ensureProviderAgents(){
+ const now=new Date().toISOString();
+ for(const [slotIndex,slot] of PROVIDER_SLOTS.entries()){
+  let agent=[...agents.values()].find(item=>item.slotIndex===slotIndex);
+  const adapter=providerRuntime.adapter(slot.id);
+  if(!agent){
+   const id='provider-'+slot.id;
+   agent={
+    id,name:slot.label,runtime:['manus','replit'].includes(slot.id)?'remote':'local',
+    capabilities:['coding','review','research','security-review','documentation'],
+    maxConcurrentTasks:adapter?.maxConcurrentTasks||1,
+    slotIndex,slotId:slot.id,slotLabel:slot.label,status:'offline',currentTasks:[],
+    registeredAt:now,lastHeartbeat:now,providerId:slot.id,
+    providerRuntime:providerRuntime.snapshot(slot.id)
+   };
+   agents.set(id,agent);
+  }else{
+   agent.providerId=slot.id;
+   agent.slotId=slot.id;
+   agent.slotLabel=slot.label;
+   agent.maxConcurrentTasks=adapter?.maxConcurrentTasks||agent.maxConcurrentTasks||1;
+   agent.currentTasks=Array.isArray(agent.currentTasks)?agent.currentTasks:[];
+   agent.providerRuntime=providerRuntime.snapshot(slot.id);
+   agent.status='offline';
+  }
+  agentStore.save(agent);
+ }
+}
+ensureProviderAgents();
 function normalizedAgentName(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();}
 function assignAgentSlot(id,name){
  const existing=agents.get(id);
@@ -185,6 +255,7 @@ function availableAgentForStep(step){
  const required=(step.requiredCapabilities||[]).map(normalizeCapability);
  const candidates=[...agents.values()]
   .filter(agent=>agent.status!=='offline'&&agent.status!=='disconnected'&&agent.currentTasks.length<agent.maxConcurrentTasks)
+  .filter(agent=>!agent.providerId||providerRuntime.canAcceptWork(agent.providerId))
   .filter(agent=>{
    const available=(agent.capabilities||[]).map(normalizeCapability);
    return required.every(capability=>available.includes(capability));
@@ -240,6 +311,10 @@ function advanceCoordinationPlan(planId){
   io.to('agent:'+agent.id).emit('agent:work',assignment);
   emit('coordination.step.assigned',{planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,agentId:agent.id,agentName:agent.name,attempt:updatedStep.attempts});
   assigned.push({stepId:updatedStep.id,key:updatedStep.key,agentId:agent.id,agentName:agent.name});
+  if(agent.providerId&&providerRuntime.canAcceptWork(agent.providerId)){
+   const runtimeWork={...assignment,planObjective:plan.objective};
+   queueMicrotask(()=>{void executeProviderAssignment(agent.id,runtimeWork);});
+  }
   plan=coordinationStore.getPlan(planId);
  }
  plan=refreshCoordinationPlanStatus(planId)||plan;
@@ -250,9 +325,80 @@ function advanceCoordinationPlan(planId){
 // returns to the ready queue and is reassigned only after an agent reconnects.
 function advanceOtherCoordinationPlans(excludedPlanId){
  const plans=coordinationStore.listPlans(1000)
-  .filter(plan=>plan.id!==excludedPlanId&&!['completed','failed'].includes(plan.status))
+  .filter(plan=>(excludedPlanId===null||plan.id!==excludedPlanId)&&!['completed','failed'].includes(plan.status))
   .sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
  for(const plan of plans)advanceCoordinationPlan(plan.id);
+}
+
+function releaseProviderWork(agentId,stepId){
+ const agent=agents.get(agentId);
+ if(!agent)return;
+ agent.currentTasks=agent.currentTasks.filter(id=>id!=='coord:'+stepId);
+ const runtime=agent.providerId?providerRuntime.snapshot(agent.providerId):null;
+ const ready=runtime&&['ready','busy'].includes(runtime.status);
+ agent.status=ready?(agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available'):'offline';
+ agent.lastHeartbeat=new Date().toISOString();
+ agentStore.save(agent);
+}
+
+async function executeProviderAssignment(agentId,assignment){
+ const runKey=assignment.stepId;
+ if(providerRuns.has(runKey))return;
+ providerRuns.add(runKey);
+ try{
+  let step=coordinationStore.getStep(assignment.stepId);
+  const agent=agents.get(agentId);
+  if(!step||!agent||!agent.providerId||step.status!=='assigned'||step.assignedAgent!==agentId)return;
+  const startedAt=new Date().toISOString();
+  step=coordinationStore.updateStep({...step,status:'in_progress',startedAt,updatedAt:startedAt});
+  refreshCoordinationPlanStatus(step.planId);
+  emit('coordination.step.started',{planId:step.planId,stepId:step.id,key:step.key,agentId,providerId:agent.providerId});
+  const plan=coordinationStore.getPlan(step.planId);
+  const result=await providerRuntime.dispatch(agent.providerId,{...assignment,planObjective:plan?.objective||''});
+  const latest=coordinationStore.getStep(step.id);
+  if(!latest||latest.status!=='in_progress'||latest.assignedAgent!==agentId)return;
+  const submittedAt=new Date().toISOString();
+  const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\n\n'+result.summary;
+  const evidence=[...result.evidence,result.success?'provider-result:success':'provider-result:needs-review'];
+  coordinationStore.addReport({
+   id:crypto.randomUUID(),stepId:latest.id,attempt:latest.attempts,agentId,
+   summary,evidence:evidence.slice(0,30),submittedAt
+  });
+  const submitted=coordinationStore.updateStep({
+   ...latest,status:'review',resultSummary:summary,evidence:evidence.slice(0,30),
+   submittedAt,updatedAt:submittedAt,reviewFeedback:null
+  });
+  releaseProviderWork(agentId,latest.id);
+  emit('coordination.step.submitted',{
+   planId:latest.planId,stepId:latest.id,key:latest.key,agentId,title:latest.title,
+   providerId:agent.providerId,providerSuccess:result.success
+  });
+  return submitted;
+ }catch(error){
+  const latest=coordinationStore.getStep(assignment.stepId);
+  if(latest&&latest.assignedAgent===agentId&&['assigned','in_progress'].includes(latest.status)){
+   const now=new Date().toISOString();
+   const exhausted=latest.attempts>=latest.maxAttempts;
+   const feedback='Provider runtime failed; work was not accepted. '+redactSecrets(error?.message||'Unknown adapter failure').slice(0,500);
+   coordinationStore.updateStep({
+    ...latest,status:exhausted?'failed':'ready',assignedAgent:null,
+    reviewFeedback:feedback,startedAt:null,submittedAt:null,updatedAt:now
+   });
+   releaseProviderWork(agentId,latest.id);
+   emit('coordination.step.runtime_failed',{
+    planId:latest.planId,stepId:latest.id,key:latest.key,agentId,
+    providerId:agents.get(agentId)?.providerId||null,attempt:latest.attempts,
+    exhausted,reason:feedback
+   });
+  }
+ }finally{
+  providerRuns.delete(runKey);
+  const latest=coordinationStore.getStep(assignment.stepId);
+  if(latest){
+   advanceCoordinationPlan(latest.planId);
+   advanceOtherCoordinationPlans(latest.planId);
+  }
+ }
 }
 
 const recoveredCoordinationSteps=coordinationStore.recoverInFlightSteps();
@@ -498,14 +644,15 @@ app.post('/api/messages/:id/ack',requireMessageAgent,(req,res)=>{
 app.post('/api/agents/register',(req,res)=>{
  const p=z.object({id:z.string().min(2).max(100),name:z.string().min(1).max(100),runtime:z.enum(['local','remote']),capabilities:z.array(z.string().max(100)).max(50).default([]),maxConcurrentTasks:z.number().int().min(1).max(20).default(1)}).safeParse(req.body);
  if(!p.success)return res.status(400).json({error:p.error.flatten()});
+ if(agents.get(p.data.id)?.providerId)return res.status(409).json({error:'This identity is managed by its configured provider adapter; configure the adapter environment instead of registering it as an external worker.'});
  const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
  const a={...prior,...p.data,...slot,status:prior?.currentTasks?.length?'busy':'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
  agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});
  for(const plan of coordinationStore.listPlans(1000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)))if(!['completed','failed'].includes(plan.status))advanceCoordinationPlan(plan.id);
  res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
 });
-app.delete('/api/agents/:id',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});agentStore.delete(a.id);agents.delete(a.id);const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};emit('agent.removed',{id:a.id,name:a.name,slot});res.json({removed:true,agentId:a.id,freedSlot:slot});});
-app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});a.lastHeartbeat=new Date().toISOString();if(req.body?.status)a.status=req.body.status;agentStore.save(a);emit('agent.heartbeat',{id:a.id,status:a.status});res.json({agent:a});});
+app.delete('/api/agents/:id',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.providerId)return res.status(409).json({error:'Provider-backed identities are reserved; disable the adapter instead of deleting the slot.'});if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});agentStore.delete(a.id);agents.delete(a.id);const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};emit('agent.removed',{id:a.id,name:a.name,slot});res.json({removed:true,agentId:a.id,freedSlot:slot});});
+app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.providerId)return res.status(409).json({error:'Provider-backed runtime health is managed by the provider adapter, not external heartbeat posts.'});a.lastHeartbeat=new Date().toISOString();if(req.body?.status)a.status=req.body.status;agentStore.save(a);emit('agent.heartbeat',{id:a.id,status:a.status});res.json({agent:a});});
 app.post('/api/tasks/:id/claim',(req,res)=>{const t=tasks.get(req.params.id),a=agents.get(req.body?.agentId);if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});if(!a)return res.status(400).json({error:'Register agent first.'});if(['done','in_progress'].includes(t.status))return res.status(409).json({error:'Task not claimable',status:t.status});if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';agentStore.save(a);emit('task.claimed',{task:t,agentId:a.id});res.json({task:t,agent:a});});
 app.post('/api/tasks/:id/progress',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});if(t.assigneeAgent&&req.body?.agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.progress={message:String(req.body?.message||'').slice(0,2000),percent:Math.max(0,Math.min(100,Number(req.body?.percent||0))),at:new Date().toISOString()};emit('task.progress',{taskId:t.id,progress:t.progress});res.json({task:t});});
 app.post('/api/tasks/:id/complete',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});const {agentId,summary,evidence=[]}=req.body||{};if(t.assigneeAgent&&agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.completionReport={summary:String(summary||'').slice(0,5000),evidence,at:new Date().toISOString()};t.status='review';const a=agents.get(agentId);if(a){a.currentTasks=a.currentTasks.filter(x=>x!==t.id);a.status='available';agentStore.save(a);}emit('task.completion_submitted',{task:t,agentId});res.json({task:t,note:'Submitted for verification; GitHub issue is not automatically closed.'});});
@@ -523,4 +670,7 @@ io.on('connection',s=>{
  s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
  });
 if(octokit)sync().catch(e=>console.error('Initial GitHub sync failed:',e.message));
-const port=Number(process.env.PORT||4000);server.listen(port,()=>console.log('Universal Agent API listening at http://localhost:'+port));
+const port=Number(process.env.PORT||4000);server.listen(port,()=>{
+ console.log('Universal Agent API listening at http://localhost:'+port);
+ providerRuntime.start().then(()=>console.log('Provider runtime lifecycle initialized.')).catch(error=>console.error('Provider runtime initialization failed:',redactSecrets(error?.message||'unknown error')));
+});

@@ -119,7 +119,7 @@ export default function SpiderWeb({ agents = [] }) {
         <span><i className="spider-legend-dot connected"/> Registered agent occupies slot</span>
         <span><i className="spider-legend-dot"/> Available provider slot</span>
       </div>
-      <div className="spider-note">Known providers map to their named slots. Other agents receive the next available stable slot on registration. Slot assignment is kept by the API for the lifetime of its current agent registry; the current registry itself is in memory and resets when the API restarts.</div>
+      <div className="spider-note">Known providers map to their named slots. Other agents receive the next available stable slot. Slot assignments persist in the API's SQLite registry across restarts; agents appear offline until they reconnect.</div>
     </section>
   );
 }

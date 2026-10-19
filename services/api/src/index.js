@@ -50,7 +50,7 @@ function githubRequired(_q,r,next){if(!octokit||!owner||!repo)return r.status(50
 async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});for(const i of issues)if(!i.pull_request)tasks.set('issue-'+i.number,issueTask(i));emit('github.synced',{repository:owner+'/'+repo,count:tasks.size});return [...tasks.values()];}
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
-app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:!!process.env.SPIDER_AGENT_API_KEY,taskCount:tasks.size,agentCount:agents.size}));
+app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:!!process.env.SPIDER_AGENT_API_KEY,coordinatorEnabled:!!process.env.SPIDER_COORDINATOR_API_KEY,taskCount:tasks.size,agentCount:agents.size}));
 app.get('/api/tasks',(_q,r)=>r.json({tasks:[...tasks.values()]}));
 app.get('/api/agents',(_q,r)=>r.json({agents:[...agents.values()]}));
 app.get('/api/events',(_q,r)=>r.json({events}));
@@ -223,17 +223,37 @@ function advanceCoordinationPlan(planId){
  plan=refreshCoordinationPlanStatus(planId)||plan;
  return {plan,assigned,unassigned,terminal:plan.status==='completed'||plan.status==='failed'};
 }
-app.get('/api/coordinator/plans',(req,res)=>{
+
+// Reconcile interrupted leases at startup. Restored agents are offline, so work
+// returns to the ready queue and is reassigned only after an agent reconnects.
+const recoveredCoordinationSteps=coordinationStore.recoverInFlightSteps();
+if(recoveredCoordinationSteps)emit('coordination.recovered',{stepCount:recoveredCoordinationSteps});
+for(const savedPlan of coordinationStore.listPlans(1000))advanceCoordinationPlan(savedPlan.id);
+
+app.get('/api/coordinator/plans',requireCoordinator,(req,res)=>{
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
  const plans=coordinationStore.listPlans(limit).map(plan=>({
   ...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))
  }));
  res.json({plans});
 });
-app.get('/api/coordinator/plans/:id',(req,res)=>{
+app.get('/api/coordinator/plans/:id',requireCoordinator,(req,res)=>{
  const plan=coordinationStore.getPlan(req.params.id);
  if(!plan)return res.status(404).json({error:'Coordination plan not found.'});
  res.json({plan:{...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))}});
+});
+app.get('/api/coordinator/reviews',requireCoordinator,(req,res)=>{
+ const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'50'),10)||50));
+ const reviews=coordinationStore.listPlans(1000).flatMap(plan=>plan.steps
+  .filter(step=>step.status==='review')
+  .map(step=>({
+   planId:plan.id,objective:plan.objective,
+   step:{...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null},
+   peerReviews:coordinationStore.listPeerReviews(step.id).filter(review=>review.attempt===step.attempts)
+    .map(review=>({...review,reviewerName:agents.get(review.reviewerAgent)?.name||review.reviewerAgent}))
+  }))
+ ).slice(0,limit);
+ res.json({reviews});
 });
 app.post('/api/coordinator/plans/draft',requireCoordinator,(req,res)=>{
  const parsed=z.object({objective:z.string().trim().min(8).max(5000)}).safeParse(req.body);
@@ -272,6 +292,42 @@ app.get('/api/agents/:id/work',requireMessageAgent,(req,res)=>{
  res.json({work:coordinationStore.listAgentWork(req.spiderAgent.id).map(step=>({
   ...step,planObjective:coordinationStore.getPlan(step.planId)?.objective||''
  }))});
+});
+app.get('/api/agents/:id/reviews',requireMessageAgent,(req,res)=>{
+ if(req.params.id!==req.spiderAgent.id)return res.status(403).json({error:'Agents may only retrieve their own peer-review queue.'});
+ const reviews=coordinationStore.listPlans(1000).flatMap(plan=>plan.steps
+  .filter(step=>step.status==='review'&&step.assignedAgent&&step.assignedAgent!==req.spiderAgent.id&&agentsArePeers(req.spiderAgent.id,step.assignedAgent))
+  .filter(step=>!coordinationStore.getPeerReviewForAgent(step.id,step.attempts,req.spiderAgent.id))
+  .map(step=>({
+   planId:plan.id,objective:plan.objective,step,
+   authorName:agents.get(step.assignedAgent)?.name||step.assignedAgent,
+   report:step.reports?.find(report=>report.attempt===step.attempts)||null,
+   peerReviews:coordinationStore.listPeerReviews(step.id).filter(review=>review.attempt===step.attempts)
+  }))
+ );
+ res.json({reviews});
+});
+app.post('/api/coordinator/steps/:id/peer-review',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({
+  decision:z.enum(['approve','request_changes','comment']),
+  feedback:z.string().trim().min(1).max(2000),
+  evidence:z.array(z.string().trim().min(1).max(500)).max(20).default([])
+ }).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.status!=='review')return res.status(409).json({error:'Peer reviews are only accepted for submitted steps awaiting coordinator review.',status:step.status});
+ if(!step.assignedAgent||step.assignedAgent===req.spiderAgent.id)return res.status(403).json({error:'The author cannot review their own step.'});
+ if(!agentsArePeers(req.spiderAgent.id,step.assignedAgent))return res.status(403).json({error:'Only a lateral peer of the author may submit this review.',peerAgentIds:peerAgentIds(req.spiderAgent.id)});
+ if(coordinationStore.getPeerReviewForAgent(step.id,step.attempts,req.spiderAgent.id))return res.status(409).json({error:'This agent has already reviewed the current attempt.'});
+ const review=coordinationStore.addPeerReview({
+  id:crypto.randomUUID(),stepId:step.id,attempt:step.attempts,
+  reviewerAgent:req.spiderAgent.id,decision:parsed.data.decision,
+  feedback:parsed.data.feedback,evidence:parsed.data.evidence,
+  createdAt:new Date().toISOString()
+ });
+ emit('coordination.peer_review.submitted',{planId:step.planId,stepId:step.id,key:step.key,reviewerAgent:req.spiderAgent.id,authorAgent:step.assignedAgent,decision:review.decision});
+ res.status(201).json({review,note:'Peer feedback is advisory; the coordinator retains final approval authority.'});
 });
 app.post('/api/coordinator/steps/:id/start',requireMessageAgent,(req,res)=>{
  const step=coordinationStore.getStep(req.params.id);
@@ -415,7 +471,9 @@ app.post('/api/agents/register',(req,res)=>{
  if(!p.success)return res.status(400).json({error:p.error.flatten()});
  const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
  const a={...prior,...p.data,...slot,status:prior?.currentTasks?.length?'busy':'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
- agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
+ agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});
+ for(const plan of coordinationStore.listPlans(1000))if(!['completed','failed'].includes(plan.status))advanceCoordinationPlan(plan.id);
+ res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
 });
 app.delete('/api/agents/:id',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});agentStore.delete(a.id);agents.delete(a.id);const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};emit('agent.removed',{id:a.id,name:a.name,slot});res.json({removed:true,agentId:a.id,freedSlot:slot});});
 app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});a.lastHeartbeat=new Date().toISOString();if(req.body?.status)a.status=req.body.status;agentStore.save(a);emit('agent.heartbeat',{id:a.id,status:a.status});res.json({agent:a});});

@@ -11,6 +11,7 @@ mkdirSync(dirname(databasePath),{recursive:true});
 const db=new Database(databasePath);
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
+db.pragma('foreign_keys = ON');
 db.exec(`
   CREATE TABLE IF NOT EXISTS agent_registry (
     id TEXT PRIMARY KEY,
@@ -46,6 +47,54 @@ db.exec(`
     ON agent_messages(to_agent, status, created_at);
   CREATE INDEX IF NOT EXISTS idx_agent_messages_trace
     ON agent_messages(trace_id, created_at);
+  CREATE TABLE IF NOT EXISTS coordination_plans (
+    id TEXT PRIMARY KEY,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned','active','completed','failed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS coordination_steps (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL REFERENCES coordination_plans(id) ON DELETE CASCADE,
+    step_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    depends_on_json TEXT NOT NULL DEFAULT '[]',
+    required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('blocked','ready','assigned','in_progress','review','done','failed')),
+    assigned_agent TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    result_summary TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    review_feedback TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    submitted_at TEXT,
+    reviewed_at TEXT,
+    UNIQUE(plan_id, step_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_coordination_steps_plan
+    ON coordination_steps(plan_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_coordination_steps_agent
+    ON coordination_steps(assigned_agent, status);
+  CREATE TABLE IF NOT EXISTS coordination_step_reports (
+    id TEXT PRIMARY KEY,
+    step_id TEXT NOT NULL REFERENCES coordination_steps(id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    agent_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    submitted_at TEXT NOT NULL,
+    review_decision TEXT CHECK (review_decision IN ('approve','reject')),
+    review_feedback TEXT,
+    reviewed_at TEXT,
+    UNIQUE(step_id, attempt)
+  );
+  CREATE INDEX IF NOT EXISTS idx_coordination_reports_step
+    ON coordination_step_reports(step_id, attempt);
 `);
 
 function parseJson(value,fallback){
@@ -212,6 +261,166 @@ export class AgentMessageStore {
   acknowledge(id,agentId){
     const result=acknowledgeMessageStatement.run(new Date().toISOString(),id,agentId);
     return result.changes>0?this.get(id):null;
+  }
+}
+
+function fromCoordinationStep(row){
+  if(!row)return null;
+  return {
+    id:row.id,
+    planId:row.plan_id,
+    key:row.step_key,
+    title:row.title,
+    description:row.description,
+    dependsOn:parseJson(row.depends_on_json,[]),
+    requiredCapabilities:parseJson(row.required_capabilities_json,[]),
+    status:row.status,
+    assignedAgent:row.assigned_agent,
+    attempts:row.attempts,
+    maxAttempts:row.max_attempts,
+    resultSummary:row.result_summary,
+    evidence:parseJson(row.evidence_json,[]),
+    reviewFeedback:row.review_feedback,
+    createdAt:row.created_at,
+    updatedAt:row.updated_at,
+    startedAt:row.started_at,
+    submittedAt:row.submitted_at,
+    reviewedAt:row.reviewed_at,
+  };
+}
+
+function fromCoordinationReport(row){
+  return {
+    id:row.id,
+    stepId:row.step_id,
+    attempt:row.attempt,
+    agentId:row.agent_id,
+    summary:row.summary,
+    evidence:parseJson(row.evidence_json,[]),
+    submittedAt:row.submitted_at,
+    reviewDecision:row.review_decision,
+    reviewFeedback:row.review_feedback,
+    reviewedAt:row.reviewed_at,
+  };
+}
+
+const findPlanStatement=db.prepare('SELECT * FROM coordination_plans WHERE id = ?');
+const listPlansStatement=db.prepare('SELECT id FROM coordination_plans ORDER BY updated_at DESC LIMIT ?');
+const insertPlanStatement=db.prepare('INSERT INTO coordination_plans (id,objective,status,created_at,updated_at) VALUES (@id,@objective,\'planned\',@createdAt,@updatedAt)');
+const updatePlanStatement=db.prepare('UPDATE coordination_plans SET status=@status,updated_at=@updatedAt WHERE id=@id');
+const insertStepStatement=db.prepare(`
+  INSERT INTO coordination_steps (
+    id,plan_id,step_key,title,description,depends_on_json,required_capabilities_json,
+    status,assigned_agent,attempts,max_attempts,created_at,updated_at
+  ) VALUES (
+    @id,@planId,@key,@title,@description,@dependsOnJson,@requiredCapabilitiesJson,
+    @status,NULL,0,@maxAttempts,@createdAt,@updatedAt
+  )
+`);
+const findStepStatement=db.prepare('SELECT * FROM coordination_steps WHERE id = ?');
+const findStepsForPlanStatement=db.prepare('SELECT * FROM coordination_steps WHERE plan_id = ? ORDER BY created_at, step_key');
+const listWorkStatement=db.prepare("SELECT * FROM coordination_steps WHERE assigned_agent = ? AND status IN ('assigned','in_progress') ORDER BY created_at");
+const updateStepStatement=db.prepare(`
+  UPDATE coordination_steps SET
+    status=@status,assigned_agent=@assignedAgent,attempts=@attempts,max_attempts=@maxAttempts,
+    result_summary=@resultSummary,evidence_json=@evidenceJson,review_feedback=@reviewFeedback,
+    updated_at=@updatedAt,started_at=@startedAt,submitted_at=@submittedAt,reviewed_at=@reviewedAt
+  WHERE id=@id
+`);
+const insertReportStatement=db.prepare(`
+  INSERT INTO coordination_step_reports
+    (id,step_id,attempt,agent_id,summary,evidence_json,submitted_at)
+  VALUES (@id,@stepId,@attempt,@agentId,@summary,@evidenceJson,@submittedAt)
+`);
+const findReportForAttemptStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? AND attempt = ?');
+const listReportsForStepStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? ORDER BY attempt');
+const reviewReportStatement=db.prepare(`
+ UPDATE coordination_step_reports SET review_decision=@decision,review_feedback=@feedback,reviewed_at=@reviewedAt
+ WHERE step_id=@stepId AND attempt=@attempt AND review_decision IS NULL
+`);
+const recoverStepsStatement=db.prepare(`
+ UPDATE coordination_steps SET
+  status=CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'ready' END,
+  assigned_agent=NULL,
+  review_feedback='Recovered after API restart before submission; reassigning safely.',
+  updated_at=@now,started_at=NULL,submitted_at=NULL
+ WHERE status IN ('assigned','in_progress')
+`);
+
+export class CoordinationStore {
+  createPlan(plan){
+    const create=db.transaction(()=>{
+      insertPlanStatement.run({
+        id:plan.id,objective:plan.objective,createdAt:plan.createdAt,updatedAt:plan.updatedAt
+      });
+      for(const step of plan.steps){
+        insertStepStatement.run({
+          id:step.id,planId:plan.id,key:step.key,title:step.title,description:step.description,
+          dependsOnJson:JSON.stringify(step.dependsOn||[]),
+          requiredCapabilitiesJson:JSON.stringify(step.requiredCapabilities||[]),
+          status:step.dependsOn?.length?'blocked':'ready',
+          maxAttempts:step.maxAttempts||2,createdAt:plan.createdAt,updatedAt:plan.updatedAt
+        });
+      }
+    });
+    create();
+    return this.getPlan(plan.id);
+  }
+
+  getPlan(id){
+    const row=findPlanStatement.get(id);
+    if(!row)return null;
+    const steps=findStepsForPlanStatement.all(id).map(fromCoordinationStep);
+    return {
+      id:row.id,objective:row.objective,status:row.status,
+      createdAt:row.created_at,updatedAt:row.updated_at,
+      steps:steps.map(step=>({...step,reports:listReportsForStepStatement.all(step.id).map(fromCoordinationReport)}))
+    };
+  }
+
+  listPlans(limit=20){
+    return listPlansStatement.all(limit).map(row=>this.getPlan(row.id));
+  }
+
+  getStep(id){
+    return fromCoordinationStep(findStepStatement.get(id));
+  }
+
+  listAgentWork(agentId){
+    return listWorkStatement.all(agentId).map(fromCoordinationStep);
+  }
+
+  updateStep(step){
+    updateStepStatement.run({
+      id:step.id,status:step.status,assignedAgent:step.assignedAgent||null,attempts:step.attempts,
+      maxAttempts:step.maxAttempts,resultSummary:step.resultSummary||null,
+      evidenceJson:JSON.stringify(step.evidence||[]),reviewFeedback:step.reviewFeedback||null,
+      updatedAt:step.updatedAt,startedAt:step.startedAt||null,
+      submittedAt:step.submittedAt||null,reviewedAt:step.reviewedAt||null
+    });
+    return this.getStep(step.id);
+  }
+
+  updatePlanStatus(id,status,updatedAt=new Date().toISOString()){
+    updatePlanStatement.run({id,status,updatedAt});
+  }
+
+  addReport(report){
+    insertReportStatement.run({
+      id:report.id,stepId:report.stepId,attempt:report.attempt,agentId:report.agentId,
+      summary:report.summary,evidenceJson:JSON.stringify(report.evidence||[]),
+      submittedAt:report.submittedAt
+    });
+    return fromCoordinationReport(findReportForAttemptStatement.get(report.stepId,report.attempt));
+  }
+
+  reviewReport(stepId,attempt,decision,feedback,reviewedAt){
+    reviewReportStatement.run({stepId,attempt,decision,feedback:feedback||null,reviewedAt});
+    return fromCoordinationReport(findReportForAttemptStatement.get(stepId,attempt));
+  }
+
+  recoverInFlightSteps(now=new Date().toISOString()){
+    return recoverStepsStatement.run({now}).changes;
   }
 }
 

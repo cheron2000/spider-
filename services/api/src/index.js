@@ -192,6 +192,9 @@ io.on('connection',s=>{
  const agentId=auth.agentId;
  if(process.env.SPIDER_AGENT_API_KEY&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
   s.join('agent:'+agentId);
+  const inbox=messageStore.inbox(agentId,20);
+  s.emit('agent:inbox',{messages:inbox});
+  emitMessageDeliveryEvents(inbox);
  }
  s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
  });

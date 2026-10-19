@@ -11,6 +11,7 @@ Spider uses a central coordinator and a peer-collaboration ring. The six named p
 - An unrecognized agent, or a second instance of a provider already occupying its canonical slot, receives the next additional slot starting at index 6.
 - Re-registering the same agent ID preserves its assigned slot across API restarts.
 - The API stores agent identity, runtime, capabilities, concurrency limit, slot assignment, status, and heartbeat timestamp in SQLite. The default file is `services/api/data/spider.db` (ignored by Git); set `SPIDER_DB_PATH` to override it.
+- On hosts with ephemeral filesystems, mount persistent storage and point `SPIDER_DB_PATH` into that mount. This SQLite registry is intended for a single API instance; local container storage alone does not guarantee persistence across redeploys.
 - `GET /api/topology` returns the coordinator, the six provider slots, their registered occupants, additional agents, and the peer-offset contract.
 - `POST /api/agents/register` returns the assigned slot with the registered agent. Registration emits an `agent.registered` event including slot metadata, so the dashboard refreshes its graph.
 - `DELETE /api/agents/:id` removes an idle agent and frees its slot. Agents with active tasks cannot be removed until those tasks are released or completed.

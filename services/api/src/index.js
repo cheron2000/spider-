@@ -223,6 +223,117 @@ function advanceCoordinationPlan(planId){
  plan=refreshCoordinationPlanStatus(planId)||plan;
  return {plan,assigned,unassigned,terminal:plan.status==='completed'||plan.status==='failed'};
 }
+app.get('/api/coordinator/plans',(req,res)=>{
+ const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
+ const plans=coordinationStore.listPlans(limit).map(plan=>({
+  ...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))
+ }));
+ res.json({plans});
+});
+app.get('/api/coordinator/plans/:id',(req,res)=>{
+ const plan=coordinationStore.getPlan(req.params.id);
+ if(!plan)return res.status(404).json({error:'Coordination plan not found.'});
+ res.json({plan:{...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))}});
+});
+app.post('/api/coordinator/plans/draft',requireCoordinator,(req,res)=>{
+ const parsed=z.object({objective:z.string().trim().min(8).max(5000)}).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const created=createCoordinationPlan(parsed.data.objective,draftCoordinationSteps(parsed.data.objective));
+ const scheduling=advanceCoordinationPlan(created.id);
+ res.status(201).json({plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+});
+app.post('/api/coordinator/plans',requireCoordinator,(req,res)=>{
+ const stepSchema=z.object({
+  key:z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
+  title:z.string().trim().min(1).max(200),
+  description:z.string().trim().min(1).max(5000),
+  dependsOn:z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)).max(20).default([]),
+  requiredCapabilities:z.array(z.string().trim().min(1).max(100)).max(20).default([]),
+  maxAttempts:z.number().int().min(1).max(5).default(2)
+ });
+ const parsed=z.object({
+  objective:z.string().trim().min(8).max(5000),
+  steps:z.array(stepSchema).min(2).max(20)
+ }).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const graphError=validateDependencyGraph(parsed.data.steps);
+ if(graphError)return res.status(400).json({error:graphError});
+ const created=createCoordinationPlan(parsed.data.objective,parsed.data.steps);
+ const scheduling=advanceCoordinationPlan(created.id);
+ res.status(201).json({plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+});
+app.post('/api/coordinator/plans/:id/advance',requireCoordinator,(req,res)=>{
+ const result=advanceCoordinationPlan(req.params.id);
+ if(result.error)return res.status(404).json({error:result.error});
+ res.json(result);
+});
+app.get('/api/agents/:id/work',requireMessageAgent,(req,res)=>{
+ if(req.params.id!==req.spiderAgent.id)return res.status(403).json({error:'Agents may only retrieve their own assigned work.'});
+ res.json({work:coordinationStore.listAgentWork(req.spiderAgent.id).map(step=>({
+  ...step,planObjective:coordinationStore.getPlan(step.planId)?.objective||''
+ }))});
+});
+app.post('/api/coordinator/steps/:id/start',requireMessageAgent,(req,res)=>{
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.assignedAgent!==req.spiderAgent.id)return res.status(403).json({error:'Step is assigned to another agent.'});
+ if(step.status==='in_progress')return res.json({step,note:'Step is already in progress.'});
+ if(step.status!=='assigned')return res.status(409).json({error:'Only assigned steps can be started.',status:step.status});
+ const now=new Date().toISOString();
+ const updated=coordinationStore.updateStep({...step,status:'in_progress',startedAt:now,updatedAt:now});
+ refreshCoordinationPlanStatus(step.planId);
+ emit('coordination.step.started',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id});
+ res.json({step:updated});
+});
+app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({
+  summary:z.string().trim().min(1).max(5000),
+  evidence:z.array(z.string().trim().min(1).max(500)).max(30).default([])
+ }).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.assignedAgent!==req.spiderAgent.id)return res.status(403).json({error:'Step is assigned to another agent.'});
+ if(!['assigned','in_progress'].includes(step.status))return res.status(409).json({error:'Step is not accepting a submission.',status:step.status});
+ const now=new Date().toISOString();
+ coordinationStore.addReport({id:crypto.randomUUID(),stepId:step.id,attempt:step.attempts,agentId:req.spiderAgent.id,summary:parsed.data.summary,evidence:parsed.data.evidence,submittedAt:now});
+ const updated=coordinationStore.updateStep({...step,status:'review',resultSummary:parsed.data.summary,evidence:parsed.data.evidence,submittedAt:now,updatedAt:now,reviewFeedback:null});
+ const agent=agents.get(req.spiderAgent.id);
+ if(agent){
+  agent.currentTasks=agent.currentTasks.filter(id=>id!=='coord:'+step.id);
+  agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
+  agentStore.save(agent);
+ }
+ emit('coordination.step.submitted',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id,title:step.title});
+ const scheduling=advanceCoordinationPlan(step.planId);
+ res.status(202).json({step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,note:'Submission saved for coordinator review; dependencies remain blocked until approval.'});
+});
+app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
+ const parsed=z.object({
+  decision:z.enum(['approve','reject']),
+  feedback:z.string().trim().max(2000).default('')
+ }).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ if(parsed.data.decision==='reject'&&!parsed.data.feedback)return res.status(400).json({error:'Feedback is required when rejecting a submission.'});
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.status!=='review')return res.status(409).json({error:'Step is not awaiting review.',status:step.status});
+ const currentPlan=coordinationStore.getPlan(step.planId);
+ const currentReport=currentPlan?.steps.find(item=>item.id===step.id)?.reports.find(report=>report.attempt===step.attempts);
+ if(!currentReport||currentReport.reviewDecision)return res.status(409).json({error:'The current attempt has already been reviewed or has no report.'});
+ const now=new Date().toISOString();
+ coordinationStore.reviewReport(step.id,step.attempts,parsed.data.decision,parsed.data.feedback,now);
+ const approved=parsed.data.decision==='approve';
+ const exhausted=!approved&&step.attempts>=step.maxAttempts;
+ const status=approved?'done':exhausted?'failed':'ready';
+ const reviewedStep=coordinationStore.updateStep({
+  ...step,status,assignedAgent:approved?step.assignedAgent:null,
+  reviewFeedback:parsed.data.feedback,reviewedAt:now,updatedAt:now
+ });
+ emit('coordination.step.reviewed',{planId:step.planId,stepId:step.id,key:step.key,decision:parsed.data.decision,agentId:step.assignedAgent,attempt:step.attempts});
+ const scheduling=advanceCoordinationPlan(step.planId);
+ res.json({step:reviewedStep,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+});
 app.get('/api/topology',(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));
  const slots=PROVIDER_SLOTS.map((slot,slotIndex)=>({ ...slot,slotIndex,agent:registered.find(a=>a.slotIndex===slotIndex)||null }));

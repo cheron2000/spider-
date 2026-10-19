@@ -72,6 +72,11 @@ export function extractCliText(stdout) {
       if (item?.type === 'item.completed' && item?.item?.type === 'agent_message' && item.item.text) records.push(item.item.text);
       else if (item?.type === 'workflow.result' && item?.data?.run?.result) records.push(typeof item.data.run.result === 'string' ? item.data.run.result : JSON.stringify(item.data.run.result));
       else if (item?.type === 'result' && item?.result) records.push(typeof item.result === 'string' ? item.result : JSON.stringify(item.result));
+      else if ((item?.type === 'assistant.message' || item?.type === 'assistant_message') && item?.data?.content) {
+        const content = item.data.content;
+        if (typeof content === 'string') records.push(content);
+        else if (Array.isArray(content)) records.push(content.map(part => typeof part === 'string' ? part : part?.text || part?.content || '').filter(Boolean).join('\\n'));
+      }
       else if (item?.type === 'assistant' && typeof item?.content === 'string') records.push(item.content);
       else if (item?.response && typeof item.response === 'string') records.push(item.response);
     } catch {

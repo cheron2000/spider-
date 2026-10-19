@@ -74,6 +74,38 @@ When an authenticated agent connects to Socket.IO with `auth: { agentId, agentAp
 
 Messages are rejected if the sender does not match the authenticated agent ID, the recipient is not registered, the task ID is invalid, or the recipient is outside the sender's four-peer neighborhood. Peer adjacency is calculated from the six reserved slots followed by additional registered slots in order.
 
+## Coordinated task execution
+
+Coordination plans, step assignments, and step reports are durable in SQLite. Plan creation validates unique step keys, dependency references, and acyclic dependency graphs before saving. The built-in draft plan includes discovery, architecture, implementation, parallel validation/security review, integration, and final acceptance. Custom plans can supply their own DAG.
+
+### Coordinator authentication
+
+Set `SPIDER_COORDINATOR_API_KEY` to a separate long random secret (32+ random bytes). Coordinator endpoints require:
+
+- `x-spider-coordinator-key: <coordinator secret>`
+
+Keep this key server-side. Do not embed it in the browser/dashboard bundle. `GET /api/health` reports whether coordinator actions are enabled, without revealing any secret.
+
+### Lifecycle endpoints
+
+- `POST /api/coordinator/plans/draft` with `{"objective":"..." }` creates and schedules the standard seven-step plan.
+- `POST /api/coordinator/plans` accepts `objective` and a `steps` array. Each step has `key`, `title`, `description`, optional `dependsOn`, optional `requiredCapabilities`, and optional `maxAttempts` (1–5). The dependency graph is validated before a plan is persisted.
+- `GET /api/coordinator/plans` and `GET /api/coordinator/plans/:id` return durable plan state and reports. `POST /api/coordinator/plans/:id/advance` retries scheduling when agents become available.
+- `GET /api/agents/:id/work` returns work assigned to the authenticated agent. Agent routes require the shared `x-spider-agent-key` and `x-agent-id` headers.
+- `POST /api/coordinator/steps/:id/start` records that the assigned owner started a step. `POST /api/coordinator/steps/:id/submit` stores a summary and evidence and moves the step into coordinator review.
+- `GET /api/agents/:id/reviews` returns submitted steps authored by a neighboring agent that are available for independent peer review.
+- `POST /api/coordinator/steps/:id/peer-review` accepts `decision` (`approve`, `request_changes`, or `comment`), required `feedback`, and optional evidence. One peer review per reviewer per attempt is recorded durably. Only a lateral peer of the author may submit; the author cannot review their own work.
+- `GET /api/coordinator/reviews` gives the coordinator a pending-review queue with the author's report and current-attempt peer feedback.
+- `POST /api/coordinator/steps/:id/review` is the final coordinator decision (`approve` or `reject`). Approval marks the step done and unlocks dependent steps. Rejection requires feedback; it returns the step to the ready queue while attempts remain, otherwise marks it failed.
+
+The coordinator, not a peer reviewer, remains the final authority. Peer feedback is advisory input for reconciling outputs; downstream steps stay blocked until the coordinator approves the submitted report. Each step has a single accountable owner, attempts are bounded, and failed dependencies prevent dependent work from running.
+
+### Recovery and boundaries
+
+On API startup, assigned/in-progress steps left behind by a crash are recovered: steps with attempts remaining return to the ready queue; exhausted steps become failed. Previously registered agents start offline, so recovered work is not reassigned until an agent reconnects. Registering an agent triggers scheduling across incomplete plans. A step in review remains in review across restart, preserving the submitted report and its peer feedback.
+
+This provides durable coordination and review workflow, not a vendor tool adapter. The named Antigravity, Codex, Copilot, Kiro, Manus, and Replit slots are still registry identities. Their actual runtimes must be integrated to poll/receive work, invoke authorized provider tools, store artifact references, submit evidence, and report heartbeat/capabilities. No provider CLI, browser-control tool, or hosted model API is implicitly connected by registering an agent.
+
 ## Execution rules
 
 1. The coordinator decomposes objectives and assigns one owner to each task.
@@ -86,6 +118,6 @@ Messages are rejected if the sender does not match the authenticated agent ID, t
 
 ## Implementation status
 
-Implemented: canonical provider slot allocation, SQLite-backed agent/slot persistence, a durable peer message queue, authenticated HTTP inbox/send/ack endpoints, four-peer routing validation, authenticated Socket.IO agent rooms, redacted dashboard activity events, idle-agent removal, and topology responses with peer maps.
+Implemented: canonical provider slot allocation, SQLite-backed agent/slot persistence, a durable peer message queue, authenticated inbox/send/ack endpoints, four-peer routing validation, private Socket.IO agent rooms, redacted activity events, idle-agent removal, durable dependency-aware coordination plans, capability-aware assignment, crash recovery for in-flight steps, durable submission reports, a neighboring-agent review queue, persistent peer-review feedback, coordinator approval/rejection with bounded retries, and topology responses with peer maps.
 
-Still separate work: real provider adapters/authentication, per-agent credentials, durable task/event state, artifact storage, task orchestration, and end-to-end validation. Testing and builds were intentionally not run per the current project instruction.
+Still separate work: real provider adapters/authentication, per-agent credentials, artifact storage beyond recorded references, richer dashboard presentation for coordination plans/reviews, unified authentication for legacy non-messaging routes, and end-to-end validation. Tests and builds were not run per the project instruction.

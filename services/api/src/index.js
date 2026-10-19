@@ -202,7 +202,7 @@ function availableAgentForStep(step){
 function advanceCoordinationPlan(planId){
  let plan=coordinationStore.getPlan(planId);
  if(!plan)return {error:'Coordination plan not found.'};
- if(plan.status==='completed')return {plan,assigned:[],unassigned:[],terminal:true};
+ if(['completed','failed'].includes(plan.status))return {plan,assigned:[],unassigned:[],terminal:true};
  let modified=true;
  while(modified){
   modified=false;

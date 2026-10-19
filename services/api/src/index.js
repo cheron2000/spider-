@@ -110,6 +110,119 @@ function peerAgentIds(agentId){
 function agentsArePeers(fromAgent,toAgent){
  return peerAgentIds(fromAgent).includes(toAgent);
 }
+function normalizeCapability(value){return String(value||'').toLowerCase().replace(/[^a-z0-9]+/g,'').trim();}
+function draftCoordinationSteps(objective){
+ return [
+  {key:'discovery',title:'Discovery and acceptance criteria',description:'Clarify scope, constraints, risks, users, and measurable acceptance criteria for: '+objective,dependsOn:[],requiredCapabilities:[],maxAttempts:2},
+  {key:'architecture',title:'Architecture and interfaces',description:'Produce a coherent architecture, module boundaries, data contracts, and implementation sequence.',dependsOn:['discovery'],requiredCapabilities:[],maxAttempts:2},
+  {key:'implementation',title:'Core implementation',description:'Implement the primary end-to-end behavior against the agreed architecture and acceptance criteria.',dependsOn:['architecture'],requiredCapabilities:[],maxAttempts:3},
+  {key:'validation',title:'Validation and regression review',description:'Review the implementation against acceptance criteria and record reproducible validation evidence. Do not merge or release.',dependsOn:['implementation'],requiredCapabilities:[],maxAttempts:2},
+  {key:'security-review',title:'Security and failure-mode review',description:'Review permissions, secret handling, failure paths, recovery behavior, and operational risks.',dependsOn:['implementation'],requiredCapabilities:[],maxAttempts:2},
+  {key:'integration',title:'Integration and documentation',description:'Resolve review findings, integrate work safely, and document setup and known limitations.',dependsOn:['validation','security-review'],requiredCapabilities:[],maxAttempts:2},
+  {key:'final-review',title:'Final acceptance review',description:'Check deliverables against the objective, summarize evidence and unresolved issues, and recommend next action. Do not perform a production release.',dependsOn:['integration'],requiredCapabilities:[],maxAttempts:2}
+ ];
+}
+function validateDependencyGraph(steps){
+ const byKey=new Map();
+ for(const step of steps){
+  if(byKey.has(step.key))return 'Step keys must be unique.';
+  byKey.set(step.key,step);
+ }
+ for(const step of steps){
+  if(new Set(step.dependsOn||[]).size!==(step.dependsOn||[]).length)return 'Step '+step.key+' has duplicate dependencies.';
+  for(const dependency of step.dependsOn||[]){
+   if(dependency===step.key)return 'Step '+step.key+' cannot depend on itself.';
+   if(!byKey.has(dependency))return 'Step '+step.key+' depends on unknown step '+dependency+'.';
+  }
+ }
+ const visiting=new Set(),visited=new Set();
+ function visit(key){
+  if(visiting.has(key))return false;
+  if(visited.has(key))return true;
+  visiting.add(key);
+  for(const dependency of byKey.get(key).dependsOn||[])if(!visit(dependency))return false;
+  visiting.delete(key);visited.add(key);return true;
+ }
+ for(const key of byKey.keys())if(!visit(key))return 'Step dependencies contain a cycle.';
+ return null;
+}
+function createCoordinationPlan(objective,stepSpecs){
+ const now=new Date().toISOString();
+ const plan=coordinationStore.createPlan({
+  id:crypto.randomUUID(),objective,createdAt:now,updatedAt:now,
+  steps:stepSpecs.map(step=>({...step,id:crypto.randomUUID()}))
+ });
+ emit('coordination.plan.created',{planId:plan.id,objective:plan.objective,stepCount:plan.steps.length});
+ return plan;
+}
+function refreshCoordinationPlanStatus(planId){
+ const plan=coordinationStore.getPlan(planId);
+ if(!plan)return null;
+ const states=plan.steps.map(step=>step.status);
+ let status='planned';
+ if(states.length&&states.every(state=>state==='done'))status='completed';
+ else if(states.length&&states.every(state=>state==='done'||state==='failed'))status='failed';
+ else if(states.some(state=>['assigned','in_progress','review','done'].includes(state)))status='active';
+ else if(states.some(state=>state==='failed')&&states.some(state=>['ready','blocked'].includes(state)))status='active';
+ coordinationStore.updatePlanStatus(planId,status);
+ return coordinationStore.getPlan(planId);
+}
+function availableAgentForStep(step){
+ const required=(step.requiredCapabilities||[]).map(normalizeCapability);
+ return [...agents.values()]
+  .filter(agent=>agent.status!=='offline'&&agent.status!=='disconnected'&&agent.currentTasks.length<agent.maxConcurrentTasks)
+  .filter(agent=>{
+   const available=(agent.capabilities||[]).map(normalizeCapability);
+   return required.every(capability=>available.includes(capability));
+  })
+  .sort((a,b)=>(a.currentTasks.length/a.maxConcurrentTasks)-(b.currentTasks.length/b.maxConcurrentTasks)||a.slotIndex-b.slotIndex)[0]||null;
+}
+function advanceCoordinationPlan(planId){
+ let plan=coordinationStore.getPlan(planId);
+ if(!plan)return {error:'Coordination plan not found.'};
+ if(plan.status==='completed')return {plan,assigned:[],unassigned:[],terminal:true};
+ let modified=true;
+ while(modified){
+  modified=false;
+  plan=coordinationStore.getPlan(planId);
+  const states=new Map(plan.steps.map(step=>[step.key,step.status]));
+  for(const step of plan.steps){
+   if(step.status!=='blocked')continue;
+   const failedDependency=step.dependsOn.find(dependency=>states.get(dependency)==='failed');
+   if(failedDependency){
+    coordinationStore.updateStep({...step,status:'failed',reviewFeedback:'Dependency '+failedDependency+' failed.',updatedAt:new Date().toISOString()});
+    emit('coordination.step.blocked',{planId,stepId:step.id,key:step.key,failedDependency});
+    modified=true;
+   }else if(step.dependsOn.every(dependency=>states.get(dependency)==='done')){
+    coordinationStore.updateStep({...step,status:'ready',updatedAt:new Date().toISOString()});
+    modified=true;
+   }
+  }
+ }
+ plan=coordinationStore.getPlan(planId);
+ const assigned=[];
+ const unassigned=[];
+ for(const step of plan.steps.filter(item=>item.status==='ready')){
+  const agent=availableAgentForStep(step);
+  if(!agent){unassigned.push(step.key);continue;}
+  const now=new Date().toISOString();
+  const updatedStep=coordinationStore.updateStep({
+   ...step,status:'assigned',assignedAgent:agent.id,attempts:step.attempts+1,
+   updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null,reviewFeedback:null
+  });
+  const workloadId='coord:'+step.id;
+  if(!agent.currentTasks.includes(workloadId))agent.currentTasks.push(workloadId);
+  agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
+  agentStore.save(agent);
+  const assignment={kind:'coordination_step',planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,description:updatedStep.description,dependsOn:updatedStep.dependsOn,attempt:updatedStep.attempts,maxAttempts:updatedStep.maxAttempts};
+  io.to('agent:'+agent.id).emit('agent:work',assignment);
+  emit('coordination.step.assigned',{planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,agentId:agent.id,agentName:agent.name,attempt:updatedStep.attempts});
+  assigned.push({stepId:updatedStep.id,key:updatedStep.key,agentId:agent.id,agentName:agent.name});
+  plan=coordinationStore.getPlan(planId);
+ }
+ plan=refreshCoordinationPlanStatus(planId)||plan;
+ return {plan,assigned,unassigned,terminal:plan.status==='completed'||plan.status==='failed'};
+}
 app.get('/api/topology',(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));
  const slots=PROVIDER_SLOTS.map((slot,slotIndex)=>({ ...slot,slotIndex,agent:registered.find(a=>a.slotIndex===slotIndex)||null }));

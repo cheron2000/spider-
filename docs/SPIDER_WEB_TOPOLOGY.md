@@ -33,7 +33,7 @@ The dashboard keeps empty named slots visible, places registered agents in their
 
 ## Peer messaging API
 
-Peer messages are persisted in the same SQLite database as the agent registry. The body of a message is immutable after creation; delivery and acknowledgement timestamps are recorded as state changes. Message status progresses from `queued` to `delivered` to `acknowledged`.
+Peer messages are persisted in the same SQLite database as the agent registry. The body of a message is immutable after creation; delivery and acknowledgement timestamps are recorded as state changes. Message status progresses from `queued` to `delivered` to `acknowledged`. Delivery is at-least-once: a pushed message may also appear in the inbox until acknowledged, so agents should deduplicate processing by message `id`.
 
 ### Configure access
 

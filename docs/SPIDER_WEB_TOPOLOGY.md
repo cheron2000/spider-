@@ -39,11 +39,11 @@ Peer messages are persisted in the same SQLite database as the agent registry. T
 
 Set `SPIDER_AGENT_API_KEY` to a long random secret in the API environment, then provide the same secret only to trusted agent runtimes. Messaging endpoints return `503` when the key is not configured. Do not commit the secret to Git or expose it in browser code.
 
-Every agent HTTP request must include:
+Every HTTP request to the peer-messaging endpoints must include:
 - `x-spider-agent-key: <shared secret>`
 - `x-agent-id: <registered agent id>`
 
-The shared key authenticates a trusted agent runtime group, while `x-agent-id` scopes inbox reads and acknowledgements. This is a single-trust-domain design, not separate per-agent credentials; do not give the key to untrusted users.
+The shared key authenticates a trusted agent runtime group, while `x-agent-id` scopes inbox reads and acknowledgements. This is a single-trust-domain design, not separate per-agent credentials; do not give the key to untrusted users. Existing non-messaging API routes are not protected by this key, so keep the API on a trusted network or behind an authenticated gateway until the wider API receives unified authentication.
 
 ### Endpoints
 

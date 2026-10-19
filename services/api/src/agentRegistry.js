@@ -161,7 +161,7 @@ const markDeliveredStatement=db.prepare(`
 `);
 const acknowledgeMessageStatement=db.prepare(`
   UPDATE agent_messages SET status='acknowledged', acknowledged_at=?
-  WHERE id=? AND to_agent=? AND status IN ('queued','delivered')
+  WHERE id=? AND to_agent=? AND status='delivered'
 `);
 const markInboxDelivered=db.transaction((agentId,limit)=>{
   const messages=pendingMessagesStatement.all(agentId,limit);
@@ -198,6 +198,11 @@ export class AgentMessageStore {
 
   get(id){
     return fromMessageRow(findMessageStatement.get(id));
+  }
+
+  markDelivered(id,agentId){
+    const result=markDeliveredStatement.run(new Date().toISOString(),id,agentId);
+    return result.changes>0?this.get(id):null;
   }
 
   inbox(agentId,limit=20){

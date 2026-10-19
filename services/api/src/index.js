@@ -6,7 +6,7 @@ import {createServer} from 'node:http';
 import {Server} from 'socket.io';
 import {Octokit} from '@octokit/rest';
 import {z} from 'zod';
-import {AgentRegistryStore,AgentMessageStore} from './agentRegistry.js';
+import {AgentRegistryStore,AgentMessageStore,CoordinationStore} from './agentRegistry.js';
 
 const app=express(),server=createServer(app),origin=process.env.DASHBOARD_ORIGIN||'http://localhost:5173';
 const io=new Server(server,{cors:{origin,methods:['GET','POST']}});
@@ -17,6 +17,7 @@ const [owner,repo]=(process.env.GITHUB_REPOSITORY||'').split('/');
 const octokit=process.env.GITHUB_TOKEN?new Octokit({auth:process.env.GITHUB_TOKEN}):null;
 const agentStore=new AgentRegistryStore();
 const messageStore=new AgentMessageStore();
+const coordinationStore=new CoordinationStore();
 const tasks=new Map();
 const agents=new Map(agentStore.list().map(agent=>[agent.id,{...agent,status:'offline',currentTasks:[]}]));
 const events=[];

@@ -139,13 +139,19 @@ app.post('/api/messages',requireMessageAgent,(req,res)=>{
   if(parent.taskId!==data.taskId||parent.traceId!==data.traceId)return res.status(400).json({error:'Replies must retain the original taskId and traceId.'});
  }
  const createdAt=new Date().toISOString();
- const message=messageStore.create({...data,id:crypto.randomUUID(),createdAt,status:'queued'});
- io.to('agent:'+message.toAgent).emit('agent:message',message);
- emit('agent.message.queued',{
+ const queued=messageStore.create({...data,id:crypto.randomUUID(),createdAt,status:'queued'});
+ const room='agent:'+queued.toAgent;
+ const connected=Boolean(io.sockets.adapter.rooms.get(room)?.size);
+ const message=connected?(messageStore.markDelivered(queued.id,queued.toAgent)||queued):queued;
+ io.to(room).emit('agent:message',message);
+ const fromName=agents.get(message.fromAgent).name;
+ const toName=agents.get(message.toAgent).name;
+ const eventType=message.status==='delivered'?'agent.message.delivered':'agent.message.queued';
+ emit(eventType,{
   id:message.id,taskId:message.taskId,traceId:message.traceId,
   fromAgent:message.fromAgent,toAgent:message.toAgent,kind:message.kind,
-  title:agents.get(message.fromAgent).name+' → '+agents.get(message.toAgent).name,
-  createdAt:message.createdAt
+  title:fromName+' → '+toName+(message.status==='delivered'?' · delivered':''),
+  createdAt:message.createdAt,deliveredAt:message.deliveredAt
  });
  res.status(201).json({message});
 });

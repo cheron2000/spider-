@@ -9,10 +9,13 @@ Spider uses a central coordinator and a peer-collaboration ring. The six named p
 - The six named provider slots are reserved even when their providers are offline.
 - When a registered agent ID or name matches a known provider, the API assigns that provider's canonical slot.
 - An unrecognized agent, or a second instance of a provider already occupying its canonical slot, receives the next additional slot starting at index 6.
-- Re-registering the same agent ID during the current API process preserves its assigned slot.
+- Re-registering the same agent ID preserves its assigned slot across API restarts.
+- The API stores agent identity, runtime, capabilities, concurrency limit, slot assignment, status, and heartbeat timestamp in SQLite. The default file is `services/api/data/spider.db` (ignored by Git); set `SPIDER_DB_PATH` to override it.
 - `GET /api/topology` returns the coordinator, the six provider slots, their registered occupants, additional agents, and the peer-offset contract.
 - `POST /api/agents/register` returns the assigned slot with the registered agent. Registration emits an `agent.registered` event including slot metadata, so the dashboard refreshes its graph.
-- Agent records and slot assignments currently live in the API's in-memory registry. They reset when the API restarts; durable registry persistence is a separate follow-up.
+- `DELETE /api/agents/:id` removes an idle agent and frees its slot. Agents with active tasks cannot be removed until those tasks are released or completed.
+- On API startup, previously registered agents load with status `offline` and an empty active-task list. A successful registration marks the agent available again; the slot remains unchanged.
+- Agent records and slot assignments survive API restarts. Task state and the event stream remain in memory and are not made durable by this registry change.
 
 ## Peer topology
 
@@ -49,6 +52,6 @@ Use references to artifacts/branches rather than copying full transcripts. Messa
 
 ## Implementation status
 
-Implemented in this change: canonical provider slot allocation, additional slots for other agents, registration responses/events with slot metadata, a topology API endpoint, and a dashboard graph that places agents according to their assigned slots.
+Implemented: canonical provider slot allocation, SQLite-backed agent/slot persistence, offline-on-restart reconciliation, idle-agent removal, registration responses/events with slot metadata, a topology API endpoint, and a dashboard graph that places agents according to their assigned slots.
 
-Still separate work: durable agent/slot storage across API restarts, real provider adapters/authentication, live peer-message transport, task/artifact exchange, and end-to-end validation. Testing was intentionally not run in this change per the current project instruction.
+Still separate work: real provider adapters/authentication, live peer-message transport, durable task/event state, task/artifact exchange, and end-to-end validation. Testing and builds were intentionally not run per the current project instruction.

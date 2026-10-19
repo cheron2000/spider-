@@ -165,15 +165,17 @@ const acknowledgeMessageStatement=db.prepare(`
 `);
 const markInboxDelivered=db.transaction((agentId,limit)=>{
   const messages=pendingMessagesStatement.all(agentId,limit);
+  const newlyDelivered=[];
   const now=new Date().toISOString();
   for(const message of messages){
     if(message.status==='queued'){
       markDeliveredStatement.run(now,message.id,agentId);
       message.status='delivered';
       message.delivered_at=now;
+      newlyDelivered.push({...message});
     }
   }
-  return messages.map(fromMessageRow);
+  return {messages:messages.map(fromMessageRow),newlyDelivered:newlyDelivered.map(fromMessageRow)};
 });
 
 export class AgentMessageStore {

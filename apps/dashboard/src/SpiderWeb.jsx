@@ -47,11 +47,11 @@ export default function SpiderWeb({ agents = [] }) {
         position: anglePosition(slotIndex, PROVIDERS.length, BASE_RADIUS),
       };
     });
-    const extras = registered.filter(agent => !used.has(agent.id)).map((agent, index) => {
+    const extraAgents = registered.filter(agent => !used.has(agent.id));
+    const extras = extraAgents.map((agent, index) => {
       const slotIndex = Number.isInteger(agent.slotIndex) && agent.slotIndex >= PROVIDERS.length
         ? agent.slotIndex
         : PROVIDERS.length + index;
-      const extraIndex = slotIndex - PROVIDERS.length;
       return {
         id: 'agent-' + agent.id,
         label: agent.name || agent.id,
@@ -59,7 +59,7 @@ export default function SpiderWeb({ agents = [] }) {
         status: agent.status || 'available',
         registered: true,
         slotIndex,
-        position: anglePosition(extraIndex, Math.max(1, registered.length - PROVIDERS.length), EXTRA_RADIUS),
+        position: anglePosition(index, Math.max(1, extraAgents.length), EXTRA_RADIUS),
       };
     });
     const all = [...primary, ...extras];

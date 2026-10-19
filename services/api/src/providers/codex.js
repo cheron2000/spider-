@@ -7,7 +7,8 @@ export function createCodexAdapter(){
     description:'OpenAI Codex CLI in bounded exec mode.',
     commandDefault:'codex',
     argsFor:prompt=>{
-      const sandbox=process.env.SPIDER_CODEX_SANDBOX==='read-only'?'read-only':'workspace-write';
+      const configured=process.env.SPIDER_CODEX_SANDBOX;
+      const sandbox=configured==='workspace-write'?'workspace-write':'read-only';
       return ['exec','--sandbox',sandbox,'--json',prompt];
     }
   });

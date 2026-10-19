@@ -95,6 +95,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_coordination_reports_step
     ON coordination_step_reports(step_id, attempt);
+  CREATE TABLE IF NOT EXISTS coordination_peer_reviews (
+    id TEXT PRIMARY KEY,
+    step_id TEXT NOT NULL REFERENCES coordination_steps(id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL,
+    reviewer_agent TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('approve','request_changes','comment')),
+    feedback TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    UNIQUE(step_id, attempt, reviewer_agent)
+  );
+  CREATE INDEX IF NOT EXISTS idx_coordination_peer_reviews_step
+    ON coordination_peer_reviews(step_id, attempt);
 `);
 
 function parseJson(value,fallback){
@@ -304,6 +317,20 @@ function fromCoordinationReport(row){
   };
 }
 
+function fromPeerReview(row){
+  if(!row)return null;
+  return {
+    id:row.id,
+    stepId:row.step_id,
+    attempt:row.attempt,
+    reviewerAgent:row.reviewer_agent,
+    decision:row.decision,
+    feedback:row.feedback,
+    evidence:parseJson(row.evidence_json,[]),
+    createdAt:row.created_at,
+  };
+}
+
 const findPlanStatement=db.prepare('SELECT * FROM coordination_plans WHERE id = ?');
 const listPlansStatement=db.prepare('SELECT id FROM coordination_plans ORDER BY updated_at DESC LIMIT ?');
 const insertPlanStatement=db.prepare('INSERT INTO coordination_plans (id,objective,status,created_at,updated_at) VALUES (@id,@objective,\'planned\',@createdAt,@updatedAt)');
@@ -334,6 +361,14 @@ const insertReportStatement=db.prepare(`
 `);
 const findReportForAttemptStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? AND attempt = ?');
 const listReportsForStepStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? ORDER BY attempt');
+const insertPeerReviewStatement=db.prepare(`
+ INSERT INTO coordination_peer_reviews
+  (id,step_id,attempt,reviewer_agent,decision,feedback,evidence_json,created_at)
+ VALUES (@id,@stepId,@attempt,@reviewerAgent,@decision,@feedback,@evidenceJson,@createdAt)
+`);
+const findPeerReviewStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE id = ?');
+const listPeerReviewsStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE step_id = ? ORDER BY attempt, created_at');
+const findPeerReviewForAgentStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE step_id = ? AND attempt = ? AND reviewer_agent = ?');
 const reviewReportStatement=db.prepare(`
  UPDATE coordination_step_reports SET review_decision=@decision,review_feedback=@feedback,reviewed_at=@reviewedAt
  WHERE step_id=@stepId AND attempt=@attempt AND review_decision IS NULL
@@ -417,6 +452,24 @@ export class CoordinationStore {
   reviewReport(stepId,attempt,decision,feedback,reviewedAt){
     reviewReportStatement.run({stepId,attempt,decision,feedback:feedback||null,reviewedAt});
     return fromCoordinationReport(findReportForAttemptStatement.get(stepId,attempt));
+  }
+
+  addPeerReview(review){
+    insertPeerReviewStatement.run({
+      id:review.id,stepId:review.stepId,attempt:review.attempt,
+      reviewerAgent:review.reviewerAgent,decision:review.decision,
+      feedback:review.feedback,evidenceJson:JSON.stringify(review.evidence||[]),
+      createdAt:review.createdAt
+    });
+    return fromPeerReview(findPeerReviewStatement.get(review.id));
+  }
+
+  listPeerReviews(stepId){
+    return listPeerReviewsStatement.all(stepId).map(fromPeerReview);
+  }
+
+  getPeerReviewForAgent(stepId,attempt,agentId){
+    return fromPeerReview(findPeerReviewForAgentStatement.get(stepId,attempt,agentId));
   }
 
   recoverInFlightSteps(now=new Date().toISOString()){

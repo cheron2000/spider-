@@ -167,6 +167,20 @@ function refreshCoordinationPlanStatus(planId){
  coordinationStore.updatePlanStatus(planId,status);
  return coordinationStore.getPlan(planId);
 }
+
+function serializeCoordinationPlan(plan){
+ if(!plan)return plan;
+ return {
+  ...plan,
+  steps:plan.steps.map(step=>({
+   ...step,
+   assignedAgentName:agents.get(step.assignedAgent)?.name||null,
+   peerReviews:coordinationStore.listPeerReviews(step.id).map(review=>({
+    ...review,reviewerName:agents.get(review.reviewerAgent)?.name||review.reviewerAgent
+   }))
+  }))
+ };
+}
 function availableAgentForStep(step){
  const required=(step.requiredCapabilities||[]).map(normalizeCapability);
  return [...agents.values()]
@@ -232,15 +246,13 @@ for(const savedPlan of coordinationStore.listPlans(1000))advanceCoordinationPlan
 
 app.get('/api/coordinator/plans',requireCoordinator,(req,res)=>{
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
- const plans=coordinationStore.listPlans(limit).map(plan=>({
-  ...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))
- }));
+ const plans=coordinationStore.listPlans(limit).map(serializeCoordinationPlan);
  res.json({plans});
 });
 app.get('/api/coordinator/plans/:id',requireCoordinator,(req,res)=>{
  const plan=coordinationStore.getPlan(req.params.id);
  if(!plan)return res.status(404).json({error:'Coordination plan not found.'});
- res.json({plan:{...plan,steps:plan.steps.map(step=>({...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null}))}});
+ res.json({plan:serializeCoordinationPlan(plan)});
 });
 app.get('/api/coordinator/reviews',requireCoordinator,(req,res)=>{
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'50'),10)||50));

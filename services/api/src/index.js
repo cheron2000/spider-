@@ -37,9 +37,14 @@ function secureEqual(candidate,expected){
  const a=Buffer.from(candidate),b=Buffer.from(expected);
  return a.length===b.length&&crypto.timingSafeEqual(a,b);
 }
+function configuredSecret(value){
+ if(typeof value!=='string')return false;
+ const secret=value.trim();
+ return secret.length>=32&&!/^(?:replace[-_ ]?me|change[-_ ]?me|your[-_ ]|example|placeholder)/i.test(secret);
+}
 function requireMessageAgent(req,res,next){
  const expected=process.env.SPIDER_AGENT_API_KEY;
- if(!expected)return res.status(503).json({error:'Agent messaging is disabled until SPIDER_AGENT_API_KEY is configured.'});
+ if(!configuredSecret(expected))return res.status(503).json({error:'Agent messaging is disabled until SPIDER_AGENT_API_KEY is set to a non-placeholder secret of at least 32 characters.'});
  if(!secureEqual(req.get('x-spider-agent-key')||'',expected))return res.status(401).json({error:'Invalid agent API key.'});
  const agentId=req.get('x-agent-id');
  const agent=agents.get(agentId);
@@ -49,7 +54,7 @@ function requireMessageAgent(req,res,next){
 }
 function requireCoordinator(req,res,next){
  const expected=process.env.SPIDER_COORDINATOR_API_KEY;
- if(!expected)return res.status(503).json({error:'Coordinator actions are disabled until SPIDER_COORDINATOR_API_KEY is configured.'});
+ if(!configuredSecret(expected))return res.status(503).json({error:'Coordinator actions are disabled until SPIDER_COORDINATOR_API_KEY is set to a non-placeholder secret of at least 32 characters.'});
  if(!secureEqual(req.get('x-spider-coordinator-key')||'',expected))return res.status(401).json({error:'Invalid coordinator API key.'});
  next();
 }
@@ -58,7 +63,7 @@ function githubRequired(_q,r,next){if(!octokit||!owner||!repo)return r.status(50
 async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});for(const i of issues)if(!i.pull_request)tasks.set('issue-'+i.number,issueTask(i));emit('github.synced',{repository:owner+'/'+repo,count:tasks.size});return [...tasks.values()];}
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
-app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:!!process.env.SPIDER_AGENT_API_KEY,coordinatorEnabled:!!process.env.SPIDER_COORDINATOR_API_KEY,taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
+app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:configuredSecret(process.env.SPIDER_AGENT_API_KEY),coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
 app.get('/api/providers',(_q,r)=>r.json({providers:providerRuntime.list()}));
 app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
  if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
@@ -656,12 +661,12 @@ app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.i
 app.post('/api/tasks/:id/claim',(req,res)=>{const t=tasks.get(req.params.id),a=agents.get(req.body?.agentId);if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});if(!a)return res.status(400).json({error:'Register agent first.'});if(['done','in_progress'].includes(t.status))return res.status(409).json({error:'Task not claimable',status:t.status});if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';agentStore.save(a);emit('task.claimed',{task:t,agentId:a.id});res.json({task:t,agent:a});});
 app.post('/api/tasks/:id/progress',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});if(t.assigneeAgent&&req.body?.agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.progress={message:String(req.body?.message||'').slice(0,2000),percent:Math.max(0,Math.min(100,Number(req.body?.percent||0))),at:new Date().toISOString()};emit('task.progress',{taskId:t.id,progress:t.progress});res.json({task:t});});
 app.post('/api/tasks/:id/complete',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});const {agentId,summary,evidence=[]}=req.body||{};if(t.assigneeAgent&&agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.completionReport={summary:String(summary||'').slice(0,5000),evidence,at:new Date().toISOString()};t.status='review';const a=agents.get(agentId);if(a){a.currentTasks=a.currentTasks.filter(x=>x!==t.id);a.status='available';agentStore.save(a);}emit('task.completion_submitted',{task:t,agentId});res.json({task:t,note:'Submitted for verification; GitHub issue is not automatically closed.'});});
-function validSignature(req){const secret=process.env.GITHUB_WEBHOOK_SECRET;if(!secret)return true;const sig=req.get('x-hub-signature-256');if(!sig||!Buffer.isBuffer(req.body))return false;const expected='sha256='+crypto.createHmac('sha256',secret).update(req.body).digest('hex');const a=Buffer.from(sig),b=Buffer.from(expected);return a.length===b.length&&crypto.timingSafeEqual(a,b);}
-app.post('/api/webhooks/github',async(req,res)=>{if(!validSignature(req))return res.status(401).json({error:'Invalid webhook signature'});let p;try{p=JSON.parse(req.body.toString());}catch{return res.status(400).json({error:'Invalid JSON'});}const event=req.get('x-github-event')||'unknown';emit('github.webhook',{event,action:p.action,repository:p.repository?.full_name});if(octokit&&['issues','issue_comment','pull_request','push','check_run','workflow_run'].includes(event))try{await sync();}catch(e){emit('github.sync.error',{message:e.message});}res.status(202).json({accepted:true});});
+function validSignature(req){const secret=process.env.GITHUB_WEBHOOK_SECRET;if(!configuredSecret(secret))return false;const sig=req.get('x-hub-signature-256');if(!sig||!Buffer.isBuffer(req.body))return false;const expected='sha256='+crypto.createHmac('sha256',secret).update(req.body).digest('hex');const a=Buffer.from(sig),b=Buffer.from(expected);return a.length===b.length&&crypto.timingSafeEqual(a,b);}
+app.post('/api/webhooks/github',async(req,res)=>{if(!configuredSecret(process.env.GITHUB_WEBHOOK_SECRET))return res.status(503).json({error:'GitHub webhooks are disabled until GITHUB_WEBHOOK_SECRET is set to a non-placeholder secret of at least 32 characters.'});if(!validSignature(req))return res.status(401).json({error:'Invalid webhook signature'});let p;try{p=JSON.parse(req.body.toString());}catch{return res.status(400).json({error:'Invalid JSON'});}const event=req.get('x-github-event')||'unknown';emit('github.webhook',{event,action:p.action,repository:p.repository?.full_name});if(octokit&&['issues','issue_comment','pull_request','push','check_run','workflow_run'].includes(event))try{await sync();}catch(e){emit('github.sync.error',{message:e.message});}res.status(202).json({accepted:true});});
 io.on('connection',s=>{
  const auth=s.handshake.auth||{};
  const agentId=auth.agentId;
- if(process.env.SPIDER_AGENT_API_KEY&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
+ if(configuredSecret(process.env.SPIDER_AGENT_API_KEY)&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
   s.join('agent:'+agentId);
   const inbox=messageStore.inbox(agentId,20);
   s.emit('agent:inbox',{messages:inbox.messages});

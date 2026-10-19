@@ -69,6 +69,7 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 - Provider CLI execution occurs on the same host/container as the Spider API. Do not enable local adapters on a multi-tenant API host unless the provider processes are isolated at the OS/container level.
 - Do not put credentials in prompts, work descriptions, evidence references, logs, or dashboard code.
 - `SPIDER_COORDINATOR_API_KEY` remains separate from provider credentials and is required for plan-management/review endpoints.
+- Peer messaging and coordinator actions stay disabled when their API key is absent, shorter than 32 characters, or a recognized placeholder. Do not deploy with example credentials. GitHub webhooks are rejected until a non-placeholder `GITHUB_WEBHOOK_SECRET` of at least 32 characters is configured.
 - The adapter status `authState: not-probed` means configuration and executable/workspace were found, not that a full authenticated model request has been verified. The first real call is the functional authentication check.
 - The Replit bridge is a separate service that must be built, hosted, and secured for your deployment. Without a valid bridge, the Replit slot remains offline.
 - No tests or builds were run as part of this change, in keeping with the instruction to skip testing for now.

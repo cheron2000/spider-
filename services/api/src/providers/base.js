@@ -82,6 +82,32 @@ export function extractCliText(stdout) {
   return redactSecrets(normalized).slice(-5000);
 }
 
+export function inspectCliOutcome(stdout) {
+  const raw=boundedText(stdout,50000);
+  const failedStatuses=new Set(['error','failed','failure','cancelled','canceled','interrupted','invalid','waiting','paused','halted']);
+  for(const line of raw.split(/\r?\n/).filter(Boolean)){
+    try{
+      const item=JSON.parse(line);
+      const statuses=[item?.status,item?.data?.status,item?.data?.run?.status,item?.result?.status]
+        .filter(value=>typeof value==='string')
+        .map(value=>value.toLowerCase());
+      const kind=[item?.type,item?.event].filter(value=>typeof value==='string').map(value=>value.toLowerCase());
+      const failureStatus=statuses.find(status=>failedStatuses.has(status));
+      if(failureStatus){
+        const detail=item?.error||item?.data?.run?.error||item?.data?.run?.reason||item?.message;
+        return {failed:true,reason:redactSecrets(typeof detail==='string'?detail:failureStatus).slice(0,1000)};
+      }
+      if(kind.some(value=>['error','error_message','turn.failed','response.failed'].includes(value))){
+        const detail=item?.error?.message||item?.error||item?.message||item?.data?.error||'Provider reported an execution error.';
+        return {failed:true,reason:redactSecrets(typeof detail==='string'?detail:JSON.stringify(detail)).slice(0,1000)};
+      }
+    }catch{
+      // Plain-text output is assessed by its exit code and authentication diagnostics.
+    }
+  }
+  return {failed:false,reason:null};
+}
+
 export function runProcess(command, args, options={}) {
   const {
     cwd, env={}, timeoutMs=300000, maxOutputChars=50000
@@ -205,15 +231,17 @@ export class CommandProviderAdapter {
       timeoutMs:boundedTimeout(process.env[this.timeoutEnv]),
     });
     const body=extractCliText(result.stdout);
-    if(result.exitCode!==0&&AUTH_FAILURE.test(result.stderr+'\n'+result.stdout)){
+    const outcome=inspectCliOutcome(result.stdout);
+    if((result.exitCode!==0||outcome.failed)&&AUTH_FAILURE.test(result.stderr+'\n'+result.stdout)){
       this.authenticationBlocked=true;
       this.healthState={status:'offline',reason:'Provider authentication failed. Sign in with the native CLI, then explicitly refresh this adapter.',checkedAt:new Date().toISOString(),authState:'failed'};
       throw new Error('Provider authentication failed; sign in with the native CLI, then refresh the adapter.');
     }
-    const summary=body||('Provider CLI exited '+String(result.exitCode)+'. '+result.stderr).slice(0,5000);
+    const summary=body||(outcome.failed?'Provider CLI reported an incomplete or failed result: '+(outcome.reason||'unspecified provider failure'):'Provider CLI exited '+String(result.exitCode)+'. '+result.stderr).slice(0,5000);
     const evidence=['provider:'+this.id,'process-exit-code:'+String(result.exitCode)];
+    if(outcome.failed)evidence.push('provider-cli-status:failure');
     if(result.signal)evidence.push('process-signal:'+result.signal);
     if(result.stderr)evidence.push('stderr-summary:'+result.stderr.slice(-350,500));
-    return {summary:summary.slice(0,5000),evidence,success:result.exitCode===0,providerStatus:'ready'};
+    return {summary:summary.slice(0,5000),evidence,success:result.exitCode===0&&!outcome.failed,providerStatus:'ready'};
   }
 }

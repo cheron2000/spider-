@@ -96,11 +96,15 @@ export class ProviderRuntimeManager {
       };
     }catch(error){
       // Failure to invoke a configured runtime takes it offline until the next health probe.
+      const previousHealth=adapter.healthState||{};
+      const authenticationFailed=previousHealth.authState==='failed';
       adapter.healthState={
         status:'offline',
-        reason:redactSecrets(error?.message||'Provider runtime invocation failed.').slice(0,300),
+        reason:authenticationFailed
+          ? redactSecrets(previousHealth.reason||'Provider authentication failed.').slice(0,300)
+          : redactSecrets(error?.message||'Provider runtime invocation failed.').slice(0,300),
         checkedAt:new Date().toISOString(),
-        authState:'unknown'
+        authState:authenticationFailed?'failed':'unknown'
       };
       throw new Error(adapter.healthState.reason);
     }finally{

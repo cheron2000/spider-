@@ -120,7 +120,7 @@ app.post('/api/messages',requireMessageAgent,(req,res)=>{
   kind:z.enum(['request_review','question','artifact_ready','blocker','handoff']),
   summary:z.string().trim().min(1).max(4000),
   artifactRefs:z.array(z.string().trim().min(1).max(500)).max(20).default([]),
-  replyTo:z.string().uuid().optional(),
+  replyTo:z.string().uuid().nullable().optional(),
   deadlineAt:z.string().datetime({offset:true}).optional()
  }).safeParse(req.body);
  if(!schema.success)return res.status(400).json({error:schema.error.flatten()});

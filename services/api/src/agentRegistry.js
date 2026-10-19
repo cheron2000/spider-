@@ -153,7 +153,7 @@ const findMessageStatement=db.prepare('SELECT * FROM agent_messages WHERE id = ?
 const pendingMessagesStatement=db.prepare(`
   SELECT * FROM agent_messages
   WHERE to_agent = ? AND status IN ('queued','delivered')
-  ORDER BY created_at ASC LIMIT ?
+  ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, created_at ASC LIMIT ?
 `);
 const markDeliveredStatement=db.prepare(`
   UPDATE agent_messages SET status='delivered', delivered_at=?
@@ -167,9 +167,13 @@ const markInboxDelivered=db.transaction((agentId,limit)=>{
   const messages=pendingMessagesStatement.all(agentId,limit);
   const now=new Date().toISOString();
   for(const message of messages){
-    if(message.status==='queued')markDeliveredStatement.run(now,message.id,agentId);
+    if(message.status==='queued'){
+      markDeliveredStatement.run(now,message.id,agentId);
+      message.status='delivered';
+      message.delivered_at=now;
+    }
   }
-  return pendingMessagesStatement.all(agentId,limit).map(fromMessageRow);
+  return messages.map(fromMessageRow);
 });
 
 export class AgentMessageStore {

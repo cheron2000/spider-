@@ -26,6 +26,26 @@ db.exec(`
     registered_at TEXT NOT NULL,
     last_heartbeat TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS agent_messages (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('request_review','question','artifact_ready','blocker','handoff')),
+    summary TEXT NOT NULL,
+    artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+    reply_to TEXT,
+    deadline_at TEXT,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','delivered','acknowledged')),
+    delivered_at TEXT,
+    acknowledged_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_messages_inbox
+    ON agent_messages(to_agent, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_agent_messages_trace
+    ON agent_messages(trace_id, created_at);
 `);
 
 function parseJson(value,fallback){
@@ -99,3 +119,88 @@ export class AgentRegistryStore {
     return deleteStatement.run(id).changes>0;
   }
 }
+
+function fromMessageRow(row){
+  if(!row)return null;
+  return {
+    id:row.id,
+    taskId:row.task_id,
+    traceId:row.trace_id,
+    fromAgent:row.from_agent,
+    toAgent:row.to_agent,
+    kind:row.kind,
+    summary:row.summary,
+    artifactRefs:parseJson(row.artifact_refs_json,[]),
+    replyTo:row.reply_to,
+    deadlineAt:row.deadline_at,
+    createdAt:row.created_at,
+    status:row.status,
+    deliveredAt:row.delivered_at,
+    acknowledgedAt:row.acknowledged_at,
+  };
+}
+
+const insertMessageStatement=db.prepare(`
+  INSERT INTO agent_messages (
+    id,task_id,trace_id,from_agent,to_agent,kind,summary,
+    artifact_refs_json,reply_to,deadline_at,created_at,status
+  ) VALUES (
+    @id,@taskId,@traceId,@fromAgent,@toAgent,@kind,@summary,
+    @artifactRefsJson,@replyTo,@deadlineAt,@createdAt,'queued'
+  )
+`);
+const findMessageStatement=db.prepare('SELECT * FROM agent_messages WHERE id = ?');
+const pendingMessagesStatement=db.prepare(`
+  SELECT * FROM agent_messages
+  WHERE to_agent = ? AND status IN ('queued','delivered')
+  ORDER BY created_at ASC LIMIT ?
+`);
+const markDeliveredStatement=db.prepare(`
+  UPDATE agent_messages SET status='delivered', delivered_at=?
+  WHERE id=? AND to_agent=? AND status='queued'
+`);
+const acknowledgeMessageStatement=db.prepare(`
+  UPDATE agent_messages SET status='acknowledged', acknowledged_at=?
+  WHERE id=? AND to_agent=? AND status IN ('queued','delivered')
+`);
+const markInboxDelivered=db.transaction((agentId,limit)=>{
+  const messages=pendingMessagesStatement.all(agentId,limit);
+  const now=new Date().toISOString();
+  for(const message of messages){
+    if(message.status==='queued')markDeliveredStatement.run(now,message.id,agentId);
+  }
+  return pendingMessagesStatement.all(agentId,limit).map(fromMessageRow);
+});
+
+export class AgentMessageStore {
+  create(message){
+    insertMessageStatement.run({
+      id:message.id,
+      taskId:message.taskId,
+      traceId:message.traceId,
+      fromAgent:message.fromAgent,
+      toAgent:message.toAgent,
+      kind:message.kind,
+      summary:message.summary,
+      artifactRefsJson:JSON.stringify(message.artifactRefs||[]),
+      replyTo:message.replyTo||null,
+      deadlineAt:message.deadlineAt||null,
+      createdAt:message.createdAt,
+    });
+    return this.get(message.id);
+  }
+
+  get(id){
+    return fromMessageRow(findMessageStatement.get(id));
+  }
+
+  inbox(agentId,limit=20){
+    return markInboxDelivered(agentId,limit);
+  }
+
+  acknowledge(id,agentId){
+    const result=acknowledgeMessageStatement.run(new Date().toISOString(),id,agentId);
+    return result.changes>0?this.get(id):null;
+  }
+}
+

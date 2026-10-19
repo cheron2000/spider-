@@ -104,7 +104,10 @@ export function inspectCliOutcome(stdout) {
       }
       if(kind.some(value=>['error','error_message','turn.failed','response.failed'].includes(value))){
         const detail=item?.error?.message||item?.error||item?.message||item?.data?.error||'Provider reported an execution error.';
-        return {failed:true,reason:redactSecrets(typeof detail==='string'?detail:JSON.stringify(detail)).slice(0,1000)};
+        const detailText=typeof detail==='string'?detail:JSON.stringify(detail);
+        // Codex may emit transient reconnect notices as "error" events before a successful turn.
+        if(kind.includes('error')&&/(reconnect(?:ing)?|retry(?:ing| attempt)?|temporary|transient)/i.test(detailText))continue;
+        return {failed:true,reason:redactSecrets(detailText).slice(0,1000)};
       }
     }catch{
       // Plain-text output is assessed by its exit code and authentication diagnostics.

@@ -152,9 +152,9 @@ app.post('/api/messages',requireMessageAgent,(req,res)=>{
 app.get('/api/agents/:id/messages',requireMessageAgent,(req,res)=>{
  if(req.params.id!==req.spiderAgent.id)return res.status(403).json({error:'Agents may only read their own inbox.'});
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
- const messages=messageStore.inbox(req.spiderAgent.id,limit);
- emitMessageDeliveryEvents(messages);
- res.json({messages});
+ const inbox=messageStore.inbox(req.spiderAgent.id,limit);
+ emitMessageDeliveryEvents(inbox.newlyDelivered);
+ res.json({messages:inbox.messages});
 });
 function emitMessageDeliveryEvents(messages){
  for(const message of messages){
@@ -193,8 +193,8 @@ io.on('connection',s=>{
  if(process.env.SPIDER_AGENT_API_KEY&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
   s.join('agent:'+agentId);
   const inbox=messageStore.inbox(agentId,20);
-  s.emit('agent:inbox',{messages:inbox});
-  emitMessageDeliveryEvents(inbox);
+  s.emit('agent:inbox',{messages:inbox.messages});
+  emitMessageDeliveryEvents(inbox.newlyDelivered);
  }
  s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
  });

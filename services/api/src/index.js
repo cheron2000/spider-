@@ -222,7 +222,7 @@ function advanceCoordinationPlan(planId){
   const now=new Date().toISOString();
   const updatedStep=coordinationStore.updateStep({
    ...step,status:'assigned',assignedAgent:agent.id,attempts:step.attempts+1,
-   updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null,reviewFeedback:null
+   resultSummary:null,evidence:[],updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null
   });
   const workloadId='coord:'+step.id;
   if(!agent.currentTasks.includes(workloadId))agent.currentTasks.push(workloadId);

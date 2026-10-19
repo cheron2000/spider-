@@ -183,12 +183,20 @@ function serializeCoordinationPlan(plan){
 }
 function availableAgentForStep(step){
  const required=(step.requiredCapabilities||[]).map(normalizeCapability);
- return [...agents.values()]
+ const candidates=[...agents.values()]
   .filter(agent=>agent.status!=='offline'&&agent.status!=='disconnected'&&agent.currentTasks.length<agent.maxConcurrentTasks)
   .filter(agent=>{
    const available=(agent.capabilities||[]).map(normalizeCapability);
    return required.every(capability=>available.includes(capability));
-  })
+  });
+ // Prefer an owner distinct from direct dependency owners for independent review
+ // and reduced single-agent bias. Fall back only when no alternative can run.
+ const plan=coordinationStore.getPlan(step.planId);
+ const dependencyOwners=new Set((plan?.steps||[])
+  .filter(parent=>(step.dependsOn||[]).includes(parent.key))
+  .map(parent=>parent.assignedAgent).filter(Boolean));
+ const independent=candidates.filter(agent=>!dependencyOwners.has(agent.id));
+ return (independent.length?independent:candidates)
   .sort((a,b)=>(a.currentTasks.length/a.maxConcurrentTasks)-(b.currentTasks.length/b.maxConcurrentTasks)||a.slotIndex-b.slotIndex)[0]||null;
 }
 function advanceCoordinationPlan(planId){
@@ -240,9 +248,16 @@ function advanceCoordinationPlan(planId){
 
 // Reconcile interrupted leases at startup. Restored agents are offline, so work
 // returns to the ready queue and is reassigned only after an agent reconnects.
+function advanceOtherCoordinationPlans(excludedPlanId){
+ const plans=coordinationStore.listPlans(1000)
+  .filter(plan=>plan.id!==excludedPlanId&&!['completed','failed'].includes(plan.status))
+  .sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+ for(const plan of plans)advanceCoordinationPlan(plan.id);
+}
+
 const recoveredCoordinationSteps=coordinationStore.recoverInFlightSteps();
 if(recoveredCoordinationSteps)emit('coordination.recovered',{stepCount:recoveredCoordinationSteps});
-for(const savedPlan of coordinationStore.listPlans(1000))advanceCoordinationPlan(savedPlan.id);
+for(const savedPlan of coordinationStore.listPlans(1000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)))advanceCoordinationPlan(savedPlan.id);
 
 app.get('/api/coordinator/plans',requireCoordinator,(req,res)=>{
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'20'),10)||20));
@@ -374,6 +389,7 @@ app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  }
  emit('coordination.step.submitted',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id,title:step.title});
  const scheduling=advanceCoordinationPlan(step.planId);
+ advanceOtherCoordinationPlans(step.planId);
  res.status(202).json({step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,note:'Submission saved for coordinator review; dependencies remain blocked until approval.'});
 });
 app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
@@ -400,6 +416,7 @@ app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
  });
  emit('coordination.step.reviewed',{planId:step.planId,stepId:step.id,key:step.key,decision:parsed.data.decision,agentId:step.assignedAgent,attempt:step.attempts});
  const scheduling=advanceCoordinationPlan(step.planId);
+ advanceOtherCoordinationPlans(step.planId);
  res.json({step:reviewedStep,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
 });
 app.get('/api/topology',(_q,r)=>{
@@ -484,7 +501,7 @@ app.post('/api/agents/register',(req,res)=>{
  const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
  const a={...prior,...p.data,...slot,status:prior?.currentTasks?.length?'busy':'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
  agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});
- for(const plan of coordinationStore.listPlans(1000))if(!['completed','failed'].includes(plan.status))advanceCoordinationPlan(plan.id);
+ for(const plan of coordinationStore.listPlans(1000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)))if(!['completed','failed'].includes(plan.status))advanceCoordinationPlan(plan.id);
  res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
 });
 app.delete('/api/agents/:id',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});agentStore.delete(a.id);agents.delete(a.id);const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};emit('agent.removed',{id:a.id,name:a.name,slot});res.json({removed:true,agentId:a.id,freedSlot:slot});});

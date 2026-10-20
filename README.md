@@ -19,7 +19,7 @@ Spider coordinates six named agent slots (Antigravity, Codex, Copilot, Kiro, Man
 4. Configure secrets and GitHub settings as needed, then run `npm run dev`.
 5. Open `http://localhost:5173`.
 
-The API starts with provider adapters offline. See [Provider adapters and runtime lifecycle](docs/PROVIDER_ADAPTERS.md) to enable individual integrations, configure isolated workspaces, inspect `GET /api/providers`, and understand the Replit bridge contract.
+The API starts with provider adapters offline. See [Provider adapters and runtime lifecycle](docs/PROVIDER_ADAPTERS.md) to enable individual integrations, configure isolated workspaces, inspect `GET /api/providers`, and understand the Replit bridge contract. The current source-level execution audit and remaining blockers are documented in [Execution audit](docs/EXECUTION_AUDIT.md).
 
 ## Security and maturity
 

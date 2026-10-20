@@ -46,7 +46,7 @@ export class ReplitAdapter{
     if(!process.env.SPIDER_REPLIT_BRIDGE_TOKEN)return this.healthState={status:'offline',reason:'SPIDER_REPLIT_BRIDGE_TOKEN is required to authenticate the bridge.',checkedAt,authState:'missing'};
     try{
       const result=await callBridge(url+'/health',{timeoutMs:5000});
-      if(result?.ok===false||result?.ready===false)throw new Error('Bridge reports not ready.');
+      if(result?.ok!==true&&result?.ready!==true)throw new Error('Bridge health must return { ok: true } or { ready: true }.');
       return this.healthState={status:'ready',reason:null,checkedAt,authState:process.env.SPIDER_REPLIT_BRIDGE_TOKEN?'configured':'not-configured'};
     }catch(error){
       return this.healthState={status:'offline',reason:redactSecrets(error.message||'Bridge health check failed.').slice(0,300),checkedAt,authState:'unknown'};

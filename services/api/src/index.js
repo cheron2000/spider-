@@ -664,21 +664,84 @@ app.post('/api/messages/:id/ack',requireMessageAgent,(req,res)=>{
  emit('agent.message.acknowledged',{id:acknowledged.id,taskId:acknowledged.taskId,fromAgent:acknowledged.fromAgent,toAgent:acknowledged.toAgent,kind:acknowledged.kind,title:(agents.get(acknowledged.fromAgent)?.name||acknowledged.fromAgent)+' → '+(agents.get(acknowledged.toAgent)?.name||acknowledged.toAgent)+' · acknowledged',acknowledgedAt:acknowledged.acknowledgedAt});
  res.json({message:acknowledged});
 });
-app.post('/api/agents/register',(req,res)=>{
- const p=z.object({id:z.string().min(2).max(100),name:z.string().min(1).max(100),runtime:z.enum(['local','remote']),capabilities:z.array(z.string().max(100)).max(50).default([]),maxConcurrentTasks:z.number().int().min(1).max(20).default(1)}).safeParse(req.body);
+app.post('/api/agents/register',requireCoordinator,(req,res)=>{
+ const p=z.object({id:z.string().min(2).max(100),name:z.string().trim().min(1).max(100),runtime:z.enum(['local','remote']),capabilities:z.array(z.string().trim().min(1).max(100)).max(50).default([]),maxConcurrentTasks:z.number().int().min(1).max(20).default(1)}).safeParse(req.body);
  if(!p.success)return res.status(400).json({error:p.error.flatten()});
  if(agents.get(p.data.id)?.providerId)return res.status(409).json({error:'This identity is managed by its configured provider adapter; configure the adapter environment instead of registering it as an external worker.'});
  const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
  const a={...prior,...p.data,...slot,status:prior?.currentTasks?.length?'busy':'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
  agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});
- for(const plan of coordinationStore.listPlans(1000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)))if(!['completed','failed'].includes(plan.status))advanceCoordinationPlan(plan.id);
+ advanceOtherCoordinationPlans(null);
  res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
 });
-app.delete('/api/agents/:id',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.providerId)return res.status(409).json({error:'Provider-backed identities are reserved; disable the adapter instead of deleting the slot.'});if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});agentStore.delete(a.id);agents.delete(a.id);const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};emit('agent.removed',{id:a.id,name:a.name,slot});res.json({removed:true,agentId:a.id,freedSlot:slot});});
-app.post('/api/agents/:id/heartbeat',(req,res)=>{const a=agents.get(req.params.id);if(!a)return res.status(404).json({error:'Agent not registered'});if(a.providerId)return res.status(409).json({error:'Provider-backed runtime health is managed by the provider adapter, not external heartbeat posts.'});a.lastHeartbeat=new Date().toISOString();if(req.body?.status)a.status=req.body.status;agentStore.save(a);emit('agent.heartbeat',{id:a.id,status:a.status});res.json({agent:a});});
-app.post('/api/tasks/:id/claim',(req,res)=>{const t=tasks.get(req.params.id),a=agents.get(req.body?.agentId);if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});if(!a)return res.status(400).json({error:'Register agent first.'});if(['done','in_progress'].includes(t.status))return res.status(409).json({error:'Task not claimable',status:t.status});if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';agentStore.save(a);emit('task.claimed',{task:t,agentId:a.id});res.json({task:t,agent:a});});
-app.post('/api/tasks/:id/progress',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});if(t.assigneeAgent&&req.body?.agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.progress={message:String(req.body?.message||'').slice(0,2000),percent:Math.max(0,Math.min(100,Number(req.body?.percent||0))),at:new Date().toISOString()};emit('task.progress',{taskId:t.id,progress:t.progress});res.json({task:t});});
-app.post('/api/tasks/:id/complete',(req,res)=>{const t=tasks.get(req.params.id);if(!t)return res.status(404).json({error:'Task not found'});const {agentId,summary,evidence=[]}=req.body||{};if(t.assigneeAgent&&agentId!==t.assigneeAgent)return res.status(403).json({error:'Task assigned to another agent'});t.completionReport={summary:String(summary||'').slice(0,5000),evidence,at:new Date().toISOString()};t.status='review';const a=agents.get(agentId);if(a){a.currentTasks=a.currentTasks.filter(x=>x!==t.id);a.status='available';agentStore.save(a);}emit('task.completion_submitted',{task:t,agentId});res.json({task:t,note:'Submitted for verification; GitHub issue is not automatically closed.'});});
+app.delete('/api/agents/:id',requireCoordinator,(req,res)=>{
+ const a=agents.get(req.params.id);
+ if(!a)return res.status(404).json({error:'Agent not registered'});
+ if(a.providerId)return res.status(409).json({error:'Provider-backed identities are reserved; disable the adapter instead of deleting the slot.'});
+ if(a.currentTasks.length)return res.status(409).json({error:'Agent has active tasks; complete or release them before removal.',activeTasks:a.currentTasks});
+ agentStore.delete(a.id);agents.delete(a.id);
+ const slot={id:a.slotId,index:a.slotIndex,label:a.slotLabel};
+ emit('agent.removed',{id:a.id,name:a.name,slot});
+ res.json({removed:true,agentId:a.id,freedSlot:slot});
+});
+app.post('/api/agents/:id/heartbeat',requireMessageAgent,(req,res)=>{
+ if(req.params.id!==req.spiderAgent.id)return res.status(403).json({error:'Agents may only heartbeat their own identity.'});
+ const parsed=z.object({status:z.enum(['available','busy','offline']).optional()}).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const a=req.spiderAgent;
+ if(a.providerId)return res.status(409).json({error:'Provider-backed runtime health is managed by the provider adapter, not external heartbeat posts.'});
+ a.lastHeartbeat=new Date().toISOString();
+ if(parsed.data.status==='offline')a.status='offline';
+ else if(parsed.data.status==='busy'||a.currentTasks.length>=a.maxConcurrentTasks)a.status='busy';
+ else a.status='available';
+ agentStore.save(a);
+ emit('agent.heartbeat',{id:a.id,status:a.status});
+ advanceOtherCoordinationPlans(null);
+ res.json({agent:a});
+});
+app.post('/api/tasks/:id/claim',requireMessageAgent,(req,res)=>{
+ const t=tasks.get(req.params.id),a=req.spiderAgent;
+ if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});
+ if(req.body?.agentId&&req.body.agentId!==a.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
+ if(a.providerId)return res.status(409).json({error:'Provider-backed agents receive dependency-aware work through the coordinator, not manual GitHub task claims.'});
+ if(['done','review','in_progress'].includes(t.status)||t.state==='closed')return res.status(409).json({error:'Task not claimable',status:t.status});
+ if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});
+ t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();
+ a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';
+ a.lastHeartbeat=new Date().toISOString();agentStore.save(a);
+ emit('task.claimed',{task:t,agentId:a.id});
+ res.json({task:t,agent:a});
+});
+app.post('/api/tasks/:id/progress',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({agentId:z.string().optional(),message:z.string().max(2000).default(''),percent:z.number().finite().min(0).max(100).default(0)}).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const t=tasks.get(req.params.id),agent=req.spiderAgent;
+ if(!t)return res.status(404).json({error:'Task not found'});
+ if(parsed.data.agentId&&parsed.data.agentId!==agent.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
+ if(t.assigneeAgent!==agent.id)return res.status(403).json({error:'Task is assigned to another agent or has not been claimed by this agent.'});
+ if(t.status!=='in_progress')return res.status(409).json({error:'Progress is only accepted for an in-progress task.',status:t.status});
+ t.progress={message:parsed.data.message,percent:parsed.data.percent,at:new Date().toISOString()};
+ agent.lastHeartbeat=t.progress.at;agentStore.save(agent);
+ emit('task.progress',{taskId:t.id,progress:t.progress});
+ res.json({task:t});
+});
+app.post('/api/tasks/:id/complete',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({agentId:z.string().optional(),summary:z.string().trim().min(1).max(5000),evidence:z.array(z.string().trim().min(1).max(500)).max(30).default([])}).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const t=tasks.get(req.params.id),agent=req.spiderAgent;
+ if(!t)return res.status(404).json({error:'Task not found'});
+ if(parsed.data.agentId&&parsed.data.agentId!==agent.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
+ if(t.assigneeAgent!==agent.id)return res.status(403).json({error:'Task is assigned to another agent or has not been claimed by this agent.'});
+ if(t.status!=='in_progress')return res.status(409).json({error:'Task is not accepting a completion report.',status:t.status});
+ const now=new Date().toISOString();
+ t.completionReport={summary:parsed.data.summary,evidence:parsed.data.evidence,at:now};
+ t.status='review';
+ agent.currentTasks=agent.currentTasks.filter(id=>id!==t.id);
+ agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
+ agent.lastHeartbeat=now;agentStore.save(agent);
+ emit('task.completion_submitted',{task:t,agentId:agent.id});
+ res.json({task:t,note:'Submitted for verification; GitHub issue is not automatically closed.'});
+});
 function validSignature(req){const secret=process.env.GITHUB_WEBHOOK_SECRET;if(!configuredSecret(secret))return false;const sig=req.get('x-hub-signature-256');if(!sig||!Buffer.isBuffer(req.body))return false;const expected='sha256='+crypto.createHmac('sha256',secret).update(req.body).digest('hex');const a=Buffer.from(sig),b=Buffer.from(expected);return a.length===b.length&&crypto.timingSafeEqual(a,b);}
 app.post('/api/webhooks/github',async(req,res)=>{if(!configuredSecret(process.env.GITHUB_WEBHOOK_SECRET))return res.status(503).json({error:'GitHub webhooks are disabled until GITHUB_WEBHOOK_SECRET is set to a non-placeholder secret of at least 32 characters.'});if(!validSignature(req))return res.status(401).json({error:'Invalid webhook signature'});let p;try{p=JSON.parse(req.body.toString());}catch{return res.status(400).json({error:'Invalid JSON'});}const event=req.get('x-github-event')||'unknown';emit('github.webhook',{event,action:p.action,repository:p.repository?.full_name});if(octokit&&['issues','issue_comment','pull_request','push','check_run','workflow_run'].includes(event))try{await sync();}catch(e){emit('github.sync.error',{message:e.message});}res.status(202).json({accepted:true});});
 io.on('connection',s=>{

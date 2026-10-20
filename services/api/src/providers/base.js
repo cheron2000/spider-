@@ -195,7 +195,7 @@ export async function probeExecutable(command, env) {
   });
 }
 
-const AUTH_FAILURE = /(authentication required|not authenticated|not logged in|please log in|please login|invalid api key|invalid token|token expired|credentials missing|sign[- ]?in required|unauthenticated|authorization failed|no active session)/i;
+const AUTH_FAILURE = /(authentication required|not authenticated|not logged in|please log in|please login|invalid api key|invalid token|token expired|credentials missing|sign[- ]?in required|unauthenticated|unauthorized|authorization failed|no active session|\\bHTTP\\s*(?:401|403)\\b|\\b(?:401\\s+unauthorized|403\\s+forbidden)\\b)/i;
 
 export class CommandProviderAdapter {
   constructor({id,label,commandDefault,argsFor,workspaceEnv,enabledEnv,commandEnv,timeoutEnv,passthroughEnv,description}) {

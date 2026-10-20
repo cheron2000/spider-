@@ -82,3 +82,34 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 - Kiro CLI command reference: https://kiro.dev/docs/cli/reference/cli-commands/
 - Manus API task creation: https://open.manus.ai/docs/v2/task.create
 - Manus task lifecycle: https://open.manus.ai/docs/v2/task-lifecycle
+
+
+## Authenticated external-worker endpoints
+
+Mutating external-worker endpoints use the shared agent identity headers:
+`x-agent-id: <registered-agent-id>` and `x-spider-agent-key: <SPIDER_AGENT_API_KEY>`.
+The key must be a unique secret of at least 32 characters. Worker registration and removal require `x-spider-coordinator-key: <SPIDER_COORDINATOR_API_KEY>`; only an administrator/coordinator should provision identities.
+
+- `POST /api/agents/register` and `DELETE /api/agents/:id`: coordinator-authenticated provisioning.
+- `POST /api/agents/:id/heartbeat`: agent-authenticated; the path identity must equal `x-agent-id`.
+- `POST /api/tasks/:id/claim`, `/progress`, and `/complete`: agent-authenticated; an agent may only mutate its own claimed task. Provider-backed identities must use the coordinator's dependency-aware execution path.
+- `GET /api/agents/:id/work`, `GET /api/agents/:id/reviews`, peer messaging, and step submissions retain agent authentication.
+
+The dashboard's current “New objective” action uses the GitHub issue starter-plan endpoint (`POST /api/ceo/plan`). The durable provider-coordinator DAG API is separate and requires the coordinator key; the dashboard does not yet expose that full workflow. Do not interpret issue creation as automatic provider execution.
+
+## Source-level execution audit (2026-10-20)
+
+This audit reviewed the planning, scheduling, provider dispatch, report submission, and external-worker mutation paths in source. It did not run builds or tests.
+
+Issues addressed in the audit commit:
+- Require coordinator authentication to provision or remove external workers.
+- Require agent authentication and identity matching for heartbeat, claim, progress, and completion; reject duplicate/non-owned task mutation and provider-backed manual claims.
+- Re-run scheduling when a worker registers or heartbeats back online, so ready coordination steps do not wait unnecessarily for a manual advance.
+- Require a Replit bridge health response to explicitly report `ok: true` or `ready: true`, and recognize more common CLI HTTP authentication failures.
+
+Known blockers after source review:
+- Dashboard objective creation and the durable provider DAG are still separate workflows.
+- Read endpoints and the general Socket.IO framework snapshot expose task/agent/event data without coordinator authentication. CORS is not an access-control boundary. Keep the API on a trusted local network or place it behind an authenticated gateway before exposing it to untrusted networks.
+- External-agent coordination steps have no heartbeat-based lease expiry. A worker that disappears after assignment can leave its step assigned/in progress until manual intervention or API restart recovery.
+- Provider CLI flag/output compatibility and remote provider credentials have not been validated end-to-end. Replit still requires a separately deployed bridge.
+- GitHub issue task status/progress/completion is held in process memory and is reconstructed from GitHub issue metadata on sync; these runtime updates are not a durable task journal.

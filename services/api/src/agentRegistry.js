@@ -112,6 +112,22 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_coordination_peer_reviews_step
     ON coordination_peer_reviews(step_id, attempt);
+  CREATE TABLE IF NOT EXISTS execution_journal (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    plan_id TEXT, step_id TEXT, attempt INTEGER, agent_id TEXT, provider_id TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}'
+  );
+  CREATE INDEX IF NOT EXISTS idx_execution_journal_step ON execution_journal(step_id, sequence DESC);
+  CREATE INDEX IF NOT EXISTS idx_execution_journal_plan ON execution_journal(plan_id, sequence DESC);
+  CREATE TRIGGER IF NOT EXISTS execution_journal_no_update BEFORE UPDATE ON execution_journal BEGIN
+    SELECT RAISE(ABORT, 'execution_journal is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS execution_journal_no_delete BEFORE DELETE ON execution_journal BEGIN
+    SELECT RAISE(ABORT, 'execution_journal is append-only');
+  END;
 `);
 
 const agentRegistryColumns=new Set(db.prepare('PRAGMA table_info(agent_registry)').all().map(column=>column.name));
@@ -414,6 +430,21 @@ const insertPeerReviewStatement=db.prepare(`
 const findPeerReviewStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE id = ?');
 const listPeerReviewsStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE step_id = ? ORDER BY attempt, created_at');
 const findPeerReviewForAgentStatement=db.prepare('SELECT * FROM coordination_peer_reviews WHERE step_id = ? AND attempt = ? AND reviewer_agent = ?');
+const insertExecutionEventStatement=db.prepare(`
+ INSERT INTO execution_journal
+  (event_id,event_type,occurred_at,plan_id,step_id,attempt,agent_id,provider_id,details_json)
+ VALUES (@eventId,@eventType,@occurredAt,@planId,@stepId,@attempt,@agentId,@providerId,@detailsJson)
+`);
+const listExecutionEventsStatement=db.prepare(`
+ SELECT sequence,event_id,event_type,occurred_at,plan_id,step_id,attempt,agent_id,provider_id,details_json
+ FROM execution_journal
+ WHERE (@planId IS NULL OR plan_id=@planId) AND (@stepId IS NULL OR step_id=@stepId)
+ ORDER BY sequence DESC LIMIT @limit OFFSET @offset
+`);
+const countExecutionEventsStatement=db.prepare(`
+ SELECT COUNT(*) AS count FROM execution_journal
+ WHERE (@planId IS NULL OR plan_id=@planId) AND (@stepId IS NULL OR step_id=@stepId)
+`);
 const reviewReportStatement=db.prepare(`
  UPDATE coordination_step_reports SET review_decision=@decision,review_feedback=@feedback,reviewed_at=@reviewedAt
  WHERE step_id=@stepId AND attempt=@attempt AND review_decision IS NULL
@@ -468,6 +499,29 @@ const expireStepStatement=db.prepare(`
 `);
 
 export class CoordinationStore {
+  appendExecutionEvent(event){
+    insertExecutionEventStatement.run({
+      eventId:event.eventId,eventType:event.eventType,occurredAt:event.occurredAt,
+      planId:event.planId||null,stepId:event.stepId||null,
+      attempt:Number.isInteger(event.attempt)?event.attempt:null,
+      agentId:event.agentId||null,providerId:event.providerId||null,
+      detailsJson:JSON.stringify(event.details||{})
+    });
+    return event.eventId;
+  }
+
+  listExecutionEvents({planId=null,stepId=null,limit=50,offset=0}={}){
+    const rows=listExecutionEventsStatement.all({planId,stepId,limit,offset});
+    return {
+      total:countExecutionEventsStatement.get({planId,stepId}).count,
+      events:rows.map(row=>({
+        sequence:row.sequence,eventId:row.event_id,eventType:row.event_type,occurredAt:row.occurred_at,
+        planId:row.plan_id,stepId:row.step_id,attempt:row.attempt,agentId:row.agent_id,
+        providerId:row.provider_id,details:parseJson(row.details_json,{})
+      }))
+    };
+  }
+
   createPlan(plan){
     const create=db.transaction(()=>{
       insertPlanStatement.run({

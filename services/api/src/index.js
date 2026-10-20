@@ -34,7 +34,24 @@ const providerRuntime=new ProviderRuntimeManager(createProviderAdapters(),{
 });
 // Persist offline state after restart while keeping every recorded slot assignment.
 for(const agent of agents.values())agentStore.save(agent);
-function emit(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString()};events.push(e);if(events.length>300)events.shift();io.to('coordinator').emit('framework:event',e);}
+function emit(type,payload){
+ const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString()};
+ events.push(e);if(events.length>300)events.shift();
+ if(type.startsWith('coordination.')){
+  const source=payload&&typeof payload==='object'?payload:{};
+  const details={};
+  for(const key of ['key','status','decision','requeued','exhausted','providerSuccess','previousAttempts','reason','reviewFeedback']){
+   if(source[key]===undefined||source[key]===null)continue;
+   details[key]=typeof source[key]==='string'?redactSecrets(source[key]).slice(0,1000):source[key];
+  }
+  coordinationStore.appendExecutionEvent({
+   eventId:e.id,eventType:type,occurredAt:e.at,planId:source.planId,stepId:source.stepId,
+   attempt:Number.isInteger(source.attempt)?source.attempt:Number.isInteger(source.previousAttempts)?source.previousAttempts:null,
+   agentId:source.agentId||source.previousAgentId,providerId:source.providerId,details
+  });
+ }
+ io.to('coordinator').emit('framework:event',e);
+}
 function secureEqual(candidate,expected){
  if(typeof candidate!=='string'||!candidate||typeof expected!=='string'||!expected)return false;
  const a=Buffer.from(candidate),b=Buffer.from(expected);
@@ -482,6 +499,27 @@ app.get('/api/coordinator/plans/:id',requireCoordinator,(req,res)=>{
  const plan=coordinationStore.getPlan(req.params.id);
  if(!plan)return res.status(404).json({error:'Coordination plan not found.'});
  res.json({plan:serializeCoordinationPlan(plan)});
+});
+app.get('/api/coordinator/execution-journal',requireCoordinator,(req,res)=>{
+ const parsed=z.object({
+  planId:z.string().trim().min(1).max(200).optional(),
+  stepId:z.string().trim().min(1).max(200).optional(),
+  limit:z.coerce.number().int().min(1).max(200).default(50),
+  offset:z.coerce.number().int().min(0).max(1000000).default(0)
+ }).safeParse(req.query);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const journal=coordinationStore.listExecutionEvents(parsed.data);
+ res.json({...journal,limit:parsed.data.limit,offset:parsed.data.offset});
+});
+app.get('/api/coordinator/steps/:id/execution-history',requireCoordinator,(req,res)=>{
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ const parsed=z.object({
+  limit:z.coerce.number().int().min(1).max(200).default(50),
+  offset:z.coerce.number().int().min(0).max(1000000).default(0)
+ }).safeParse(req.query);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ res.json({stepId:step.id,...coordinationStore.listExecutionEvents({stepId:step.id,...parsed.data}),limit:parsed.data.limit,offset:parsed.data.offset});
 });
 app.get('/api/coordinator/reviews',requireCoordinator,(req,res)=>{
  const limit=Math.max(1,Math.min(100,Number.parseInt(String(req.query.limit||'50'),10)||50));

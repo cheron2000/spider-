@@ -56,9 +56,9 @@ The GitHub task cache is an in-memory `Map`. Sync reconstructs it from GitHub is
 
 CLI adapters depend on installed versions, flags, native login state, permissions, and output formats. Manus output parsing and bridge-health checks exist in source, but live authenticated execution has not been demonstrated for all providers. Replit still requires a separately deployed bridge. A configuration/executable readiness signal is not proof of authentication or successful work execution.
 
-### P2 — Execution evidence and review policy need further definition
+### P1 — Execution journal and provenance
 
-Keep provider ID, step ID, attempt, workspace/revision identity, timestamps, exit status, bounded output, and changed-file references where available. A zero exit code alone must not auto-approve work. Peer reviews are currently advisory; coordinator approval remains the gating decision.
+Coordination lifecycle events are written to an append-only SQLite execution journal and exposed through coordinator-authenticated, paginated read endpoints. Each event stores a stable event ID, type, timestamp, plan/step/attempt/agent/provider identity where available, and a small allowlisted set of redacted details. Database triggers reject updates and deletes. The journal records coordinator-visible lifecycle transitions, not a complete OS-level process trace; provider exit evidence, workspace/revision identity, and changed-file references still need richer structured capture. A zero exit code alone must not auto-approve work. Peer reviews remain advisory; coordinator approval is the gating decision.
 
 ## Previously applied controls retained
 

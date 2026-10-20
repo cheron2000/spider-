@@ -119,7 +119,7 @@ export class ManusAdapter{
     if(taskUrl)evidence.push('manus-task-url:'+taskUrl.slice(0,500));
     if(state==='waiting')return {summary:'Manus is waiting for user confirmation or additional input. Do not treat this as completed work.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
     if(state==='error')return {summary:'Manus reported an execution error.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
-    if(state==='unknown')return {summary:'Manus stopped, but task.detail omitted has_running_background_jobs. Treat this report as incomplete until the task is manually verified.\\n\\n'+summary,evidence,success:false,providerStatus:'ready'};
+    if(state==='unknown')return {summary:'Manus stopped, but task.detail omitted has_running_background_jobs. Treat this report as incomplete until the task is manually verified.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
     if(!summary)return {summary:'Manus stopped without returning readable result text. Treat this report as incomplete and inspect the Manus task before approval.',evidence,success:false,providerStatus:'ready'};
     return {summary,evidence,success:true,providerStatus:'ready'};
     }catch(error){

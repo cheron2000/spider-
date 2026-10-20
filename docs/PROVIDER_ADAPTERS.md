@@ -110,7 +110,12 @@ Issues addressed in the audit commit:
 
 Known blockers after source review:
 - Dashboard objective creation and the durable provider DAG are still separate workflows.
-- Read endpoints and the general Socket.IO framework snapshot expose task/agent/event data without coordinator authentication. CORS is not an access-control boundary. Keep the API on a trusted local network or place it behind an authenticated gateway before exposing it to untrusted networks.
+- CORS is not an access-control boundary. Keep the API on a trusted local network or place it behind an authenticated gateway before exposing it to untrusted networks.
 - External-agent coordination steps have no heartbeat-based lease expiry. A worker that disappears after assignment can leave its step assigned/in progress until manual intervention or API restart recovery.
 - Provider CLI flag/output compatibility and remote provider credentials have not been validated end-to-end. The Manus adapter now checks task detail after a stopped event, but live API execution remains unverified. Replit still requires a separately deployed bridge.
 - GitHub issue task status/progress/completion is held in process memory and is reconstructed from GitHub issue metadata on sync; these runtime updates are not a durable task journal.
+
+
+## Dashboard and read API access control
+
+Task, agent, event, provider, and topology read endpoints now require `x-spider-coordinator-key`. The dashboard stores the coordinator key in browser local storage and sends it in API requests and the Socket.IO handshake. The API sends framework snapshots and live framework events only to authenticated coordinator sockets. The public health endpoint remains intentionally limited to operational status and must not be treated as an authenticated diagnostic endpoint. Do not use the dashboard on a shared/untrusted browser profile, and do not expose the API directly to the public internet.

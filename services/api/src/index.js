@@ -31,7 +31,7 @@ const providerRuntime=new ProviderRuntimeManager(createProviderAdapters(),{
 });
 // Persist offline state after restart while keeping every recorded slot assignment.
 for(const agent of agents.values())agentStore.save(agent);
-function emit(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString()};events.push(e);if(events.length>300)events.shift();io.emit('framework:event',e);}
+function emit(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString()};events.push(e);if(events.length>300)events.shift();io.to('coordinator').emit('framework:event',e);}
 function secureEqual(candidate,expected){
  if(typeof candidate!=='string'||!candidate||typeof expected!=='string'||!expected)return false;
  const a=Buffer.from(candidate),b=Buffer.from(expected);
@@ -64,16 +64,16 @@ async function sync(){const issues=await octokit.paginate(octokit.issues.listFor
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
 app.get('/api/health',(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:configuredSecret(process.env.SPIDER_AGENT_API_KEY),coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
-app.get('/api/providers',(_q,r)=>r.json({providers:providerRuntime.list()}));
+app.get('/api/providers',requireCoordinator,(_q,r)=>r.json({providers:providerRuntime.list()}));
 app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
  if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
  res.json({provider:await providerRuntime.refresh(req.params.id,{reset:true})});
 });
-app.get('/api/tasks',(_q,r)=>r.json({tasks:[...tasks.values()]}));
-app.get('/api/agents',(_q,r)=>r.json({agents:[...agents.values()]}));
-app.get('/api/events',(_q,r)=>r.json({events}));
-app.post('/api/github/sync',githubRequired,async(_q,r)=>{try{r.json({tasks:await sync()});}catch(e){r.status(502).json({error:e.message});}});
-app.post('/api/ceo/plan',githubRequired,async(req,res)=>{
+app.get('/api/tasks',requireCoordinator,(_q,r)=>r.json({tasks:[...tasks.values()]}));
+app.get('/api/agents',requireCoordinator,(_q,r)=>r.json({agents:[...agents.values()]}));
+app.get('/api/events',requireCoordinator,(_q,r)=>r.json({events}));
+app.post('/api/github/sync',requireCoordinator,githubRequired,async(_q,r)=>{try{r.json({tasks:await sync()});}catch(e){r.status(502).json({error:e.message});}});
+app.post('/api/ceo/plan',requireCoordinator,githubRequired,async(req,res)=>{
  const p=z.object({objective:z.string().min(8).max(5000),maxTasks:z.number().int().min(2).max(12).optional()}).safeParse(req.body);
  if(!p.success)return res.status(400).json({error:p.error.flatten()});
  try{const {objective,maxTasks=6}=p.data;emit('ceo.planning.started',{objective});
@@ -588,7 +588,7 @@ app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
  advanceOtherCoordinationPlans(step.planId);
  res.json({step:reviewedStep,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
 });
-app.get('/api/topology',(_q,r)=>{
+app.get('/api/topology',requireCoordinator,(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));
  const slots=PROVIDER_SLOTS.map((slot,slotIndex)=>({ ...slot,slotIndex,agent:registered.find(a=>a.slotIndex===slotIndex)||null }));
  const extras=registered.filter(a=>a.slotIndex>=PROVIDER_SLOTS.length).sort((a,b)=>a.slotIndex-b.slotIndex);
@@ -746,6 +746,8 @@ function validSignature(req){const secret=process.env.GITHUB_WEBHOOK_SECRET;if(!
 app.post('/api/webhooks/github',async(req,res)=>{if(!configuredSecret(process.env.GITHUB_WEBHOOK_SECRET))return res.status(503).json({error:'GitHub webhooks are disabled until GITHUB_WEBHOOK_SECRET is set to a non-placeholder secret of at least 32 characters.'});if(!validSignature(req))return res.status(401).json({error:'Invalid webhook signature'});let p;try{p=JSON.parse(req.body.toString());}catch{return res.status(400).json({error:'Invalid JSON'});}const event=req.get('x-github-event')||'unknown';emit('github.webhook',{event,action:p.action,repository:p.repository?.full_name});if(octokit&&['issues','issue_comment','pull_request','push','check_run','workflow_run'].includes(event))try{await sync();}catch(e){emit('github.sync.error',{message:e.message});}res.status(202).json({accepted:true});});
 io.on('connection',s=>{
  const auth=s.handshake.auth||{};
+ const coordinatorAuthorized=configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY)&&secureEqual(auth.coordinatorKey,process.env.SPIDER_COORDINATOR_API_KEY);
+ if(coordinatorAuthorized)s.join('coordinator');
  const agentId=auth.agentId;
  if(configuredSecret(process.env.SPIDER_AGENT_API_KEY)&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
   s.join('agent:'+agentId);
@@ -753,7 +755,7 @@ io.on('connection',s=>{
   s.emit('agent:inbox',{messages:inbox.messages});
   emitMessageDeliveryEvents(inbox.newlyDelivered);
  }
- s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
+ if(coordinatorAuthorized)s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
  });
 if(octokit)sync().catch(e=>console.error('Initial GitHub sync failed:',e.message));
 const port=Number(process.env.PORT||4000);server.listen(port,()=>{

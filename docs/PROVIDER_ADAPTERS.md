@@ -69,7 +69,7 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 - Provider CLI execution occurs on the same host/container as the Spider API. Do not enable local adapters on a multi-tenant API host unless the provider processes are isolated at the OS/container level.
 - Do not put credentials in prompts, work descriptions, evidence references, logs, or dashboard code.
 - `SPIDER_COORDINATOR_API_KEY` remains separate from provider credentials and is required for plan-management/review endpoints.
-- Peer messaging and coordinator actions stay disabled when their API key is absent, shorter than 32 characters, or a recognized placeholder. Do not deploy with example credentials. GitHub webhooks are rejected until a non-placeholder `GITHUB_WEBHOOK_SECRET` of at least 32 characters is configured.
+- Coordinator actions stay disabled when `SPIDER_COORDINATOR_API_KEY` is absent, shorter than 32 characters, or a recognized placeholder. External worker routes require a provisioned per-agent credential. Do not deploy with example credentials. GitHub webhooks are rejected until a non-placeholder `GITHUB_WEBHOOK_SECRET` of at least 32 characters is configured.
 - The adapter status `authState: not-probed` means configuration and executable/workspace were found, not that a full authenticated model request has been verified. The first real call is the functional authentication check.
 - The Replit bridge is a separate service that must be built, hosted, and secured for your deployment. Without a valid bridge, the Replit slot remains offline.
 - Lease fencing protects Spider's SQLite coordination state; it does not undo external side effects from a worker whose lease expired. Work that is not safe to repeat needs task-specific idempotency or compensation.
@@ -87,11 +87,13 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 
 ## Authenticated external-worker endpoints
 
-Mutating external-worker endpoints use the shared agent identity headers:
-`x-agent-id: <registered-agent-id>` and `x-spider-agent-key: <SPIDER_AGENT_API_KEY>`.
-The key must be a unique secret of at least 32 characters. Worker registration and removal require `x-spider-coordinator-key: <SPIDER_COORDINATOR_API_KEY>`; only an administrator/coordinator should provision identities.
+Mutating external-worker endpoints use an identity-bound credential:
+`x-agent-id: <registered-agent-id>` and `x-spider-agent-key: <per-agent credential>`.
+The coordinator provisions credentials through `POST /api/agents/register`; the response includes a randomly generated credential shown once when the identity has no credential yet. For an existing agent, rotate it with `POST /api/agents/:id/credential`. Store the value in the worker's secret manager. SQLite stores only the SHA-256 hash, and read APIs never return the credential. Rotation immediately invalidates the previous credential. Worker registration, credential rotation, and removal require `x-spider-coordinator-key: <SPIDER_COORDINATOR_API_KEY>`; only an administrator/coordinator should provision identities.
 
-- `POST /api/agents/register` and `DELETE /api/agents/:id`: coordinator-authenticated provisioning.
+- `POST /api/agents/register`: coordinator-authenticated provisioning; returns a new per-agent credential once if none exists.
+- `POST /api/agents/:id/credential`: coordinator-authenticated credential rotation; returns the replacement once and immediately invalidates the previous credential.
+- `DELETE /api/agents/:id`: coordinator-authenticated removal.
 - `POST /api/agents/:id/heartbeat`: agent-authenticated; the path identity must equal `x-agent-id`.
 - `POST /api/tasks/:id/claim`, `/progress`, and `/complete`: agent-authenticated; an agent may only mutate its own claimed task. Provider-backed identities must use the coordinator's dependency-aware execution path.
 - `GET /api/agents/:id/work` returns active step lease expiry and assignment token. Workers must retain the token with that attempt.

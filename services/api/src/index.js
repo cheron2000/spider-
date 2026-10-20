@@ -45,13 +45,22 @@ function configuredSecret(value){
  const secret=value.trim();
  return secret.length>=32&&!/^(?:replace[-_ ]?me|change[-_ ]?me|your[-_ ]|example|placeholder)/i.test(secret);
 }
+function credentialHash(value){
+ return crypto.createHash('sha256').update(value,'utf8').digest('hex');
+}
+function authenticateAgentCredential(agentId,credential){
+ if(typeof credential!=='string'||credential.length<32||credential.length>256)return false;
+ const expectedHash=agentStore.getCredentialHash(agentId);
+ if(!expectedHash)return false;
+ return secureEqual(credentialHash(credential),expectedHash);
+}
 function requireMessageAgent(req,res,next){
- const expected=process.env.SPIDER_AGENT_API_KEY;
- if(!configuredSecret(expected))return res.status(503).json({error:'Agent messaging is disabled until SPIDER_AGENT_API_KEY is set to a non-placeholder secret of at least 32 characters.'});
- if(!secureEqual(req.get('x-spider-agent-key')||'',expected))return res.status(401).json({error:'Invalid agent API key.'});
  const agentId=req.get('x-agent-id');
  const agent=agents.get(agentId);
  if(!agent)return res.status(401).json({error:'x-agent-id must identify a registered agent.'});
+ if(!authenticateAgentCredential(agentId,req.get('x-spider-agent-key')||'')){
+  return res.status(401).json({error:'Invalid or unprovisioned per-agent credential. Ask the coordinator to provision or rotate this agent credential.'});
+ }
  req.spiderAgent=agent;
  next();
 }
@@ -67,7 +76,7 @@ async function sync(){const issues=await octokit.paginate(octokit.issues.listFor
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
 app.get('/api/health',(_q,r)=>r.json({ok:true,service:'spider-api'}));
-app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentMessaging:configuredSecret(process.env.SPIDER_AGENT_API_KEY),coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
+app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentCredentialMode:'per-agent-sha256-hash',coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
 app.get('/api/providers',requireCoordinator,(_q,r)=>r.json({providers:providerRuntime.list()}));
 app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
  if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
@@ -728,9 +737,30 @@ app.post('/api/agents/register',requireCoordinator,(req,res)=>{
  if(agents.get(p.data.id)?.providerId)return res.status(409).json({error:'This identity is managed by its configured provider adapter; configure the adapter environment instead of registering it as an external worker.'});
  const prior=agents.get(p.data.id),slot=assignAgentSlot(p.data.id,p.data.name),now=new Date().toISOString();
  const a={...prior,...p.data,...slot,status:prior?.currentTasks?.length?'busy':'available',currentTasks:prior?.currentTasks||[],registeredAt:prior?.registeredAt||now,lastHeartbeat:now};
- agentStore.save(a);agents.set(a.id,a);emit('agent.registered',{agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel}});
+ agentStore.save(a);
+ let agentCredential=null;
+ if(!agentStore.getCredentialHash(a.id)){
+  agentCredential=crypto.randomBytes(32).toString('base64url');
+  if(!agentStore.setCredentialHash(a.id,credentialHash(agentCredential)))return res.status(500).json({error:'Could not persist agent credential.'});
+ }
+ agents.set(a.id,a);
+ emit('agent.registered',{agentId:a.id,name:a.name,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},credentialProvisioned:Boolean(agentCredential)});
  advanceOtherCoordinationPlans(null);
- res.status(prior?200:201).json({agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},topology:'/api/topology'});
+ res.status(prior?200:201).json({
+  agent:a,slot:{id:a.slotId,index:a.slotIndex,label:a.slotLabel},
+  credential:agentCredential?{header:'x-spider-agent-key',value:agentCredential,shownOnce:true}:null,
+  credentialNote:agentCredential?'Store this credential securely; Spider stores only its SHA-256 hash and will not show it again.':'Existing credential retained. Use the rotation endpoint to issue a new credential.',
+  topology:'/api/topology'
+ });
+});
+app.post('/api/agents/:id/credential',requireCoordinator,(req,res)=>{
+ const agent=agents.get(req.params.id);
+ if(!agent)return res.status(404).json({error:'Agent not registered.'});
+ if(agent.providerId)return res.status(409).json({error:'Provider-backed identities do not use external-worker credentials.'});
+ const credential=crypto.randomBytes(32).toString('base64url');
+ if(!agentStore.setCredentialHash(agent.id,credentialHash(credential)))return res.status(500).json({error:'Could not persist agent credential.'});
+ emit('agent.credential.rotated',{agentId:agent.id});
+ res.json({agentId:agent.id,credential:{header:'x-spider-agent-key',value:credential,shownOnce:true},note:'Store this credential securely. The previous credential is now invalid; Spider stores only its SHA-256 hash.'});
 });
 app.delete('/api/agents/:id',requireCoordinator,(req,res)=>{
  const a=agents.get(req.params.id);
@@ -807,7 +837,7 @@ io.on('connection',s=>{
  const coordinatorAuthorized=configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY)&&secureEqual(auth.coordinatorKey,process.env.SPIDER_COORDINATOR_API_KEY);
  if(coordinatorAuthorized)s.join('coordinator');
  const agentId=auth.agentId;
- if(configuredSecret(process.env.SPIDER_AGENT_API_KEY)&&secureEqual(auth.agentApiKey,process.env.SPIDER_AGENT_API_KEY)&&agents.has(agentId)){
+ if(agents.has(agentId)&&authenticateAgentCredential(agentId,auth.agentApiKey)){
   s.join('agent:'+agentId);
   const inbox=messageStore.inbox(agentId,20);
   s.emit('agent:inbox',{messages:inbox.messages});

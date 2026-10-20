@@ -15,15 +15,15 @@ The current source protects coordinator-facing data and action surfaces. The das
 | --- | --- | --- |
 | `GET /api/tasks`, `/api/agents`, `/api/events`, `/api/providers`, `/api/topology` | `requireCoordinator` | Protected by a configured coordinator secret of at least 32 characters. |
 | Coordinator plan, review, provider-refresh, GitHub-sync, issue-planning, registration, and removal actions | `requireCoordinator` | Protected by coordinator authorization. |
-| Worker work/review queues, step start/submit/peer review, messages, acknowledgements, heartbeat, and legacy task claim/progress/completion | `requireMessageAgent`, followed by route-specific identity and ownership checks | Requires the configured shared agent key and a registered `x-agent-id`; route handlers check assigned ownership or sender/recipient identity where applicable. |
+| Worker work/review queues, step start/submit/peer review, messages, acknowledgements, heartbeat, and legacy task claim/progress/completion | `requireMessageAgent`, followed by route-specific identity and ownership checks | Requires the registered agent's per-agent credential in `x-spider-agent-key`; the credential hash must match the registered `x-agent-id`. |
 | `GET /api/health` | Public minimal liveness response | Returns only `ok` and a fixed service identifier. Detailed diagnostics are not exposed here. |
 | `GET /api/coordinator/health` | `requireCoordinator` | Serves the dashboard's operational details only to an authenticated coordinator. |
 | `POST /api/webhooks/github` | HMAC SHA-256 webhook signature validation | Rejects requests when the webhook secret is missing/placeholder or the signature is invalid. |
-| Socket.IO framework snapshots/events | Coordinator sockets join the `coordinator` room; framework broadcasts target that room | Unauthenticated sockets do not receive the framework snapshot or general framework events. Agent sockets receive only their agent inbox/messages when the shared agent key and registered identity are supplied. |
+| Socket.IO framework snapshots/events | Coordinator sockets join the `coordinator` room; framework broadcasts target that room | Unauthenticated sockets do not receive the framework snapshot or general framework events. Agent sockets receive only their agent inbox/messages when a valid per-agent credential and registered identity are supplied. |
 
 ### Remaining access-control limitation
 
-**P1 — Agent identities are not cryptographically distinct.** All workers use the same `SPIDER_AGENT_API_KEY`, while `x-agent-id` identifies the requested worker. Route-level ownership checks prevent many cross-agent actions, but any party that possesses the shared agent key can assert another registered agent ID. Before treating workers as mutually untrusted, introduce per-agent credentials (stored safely, rotatable, and never returned by read APIs) or another mechanism that cryptographically binds each credential to exactly one identity.
+**Mitigated at source level — per-agent credential binding.** External worker credentials are generated per identity, stored in SQLite only as SHA-256 hashes, verified with constant-time comparison, and returned only once by registration or explicit credential rotation. HTTP worker routes and agent Socket.IO rooms validate the credential against the claimed registered identity. Existing agents without individual credentials must be provisioned or rotated by a coordinator before worker authentication succeeds. This change has not been runtime-tested.
 
 CORS is not an authorization boundary. Coordinator authentication depends on keeping `SPIDER_COORDINATOR_API_KEY` secret; the current dashboard local-storage design is not suitable for shared or untrusted browser profiles.
 
@@ -62,8 +62,8 @@ Keep provider ID, step ID, attempt, workspace/revision identity, timestamps, exi
 
 ## Previously applied controls retained
 
-- Coordinator authentication for external agent registration/removal and coordinator-only operations.
-- Registered-agent checks and route-level ownership validation for worker operations.
+- Coordinator authentication for external agent registration/removal/credential rotation and coordinator-only operations.
+- Per-agent credential hashes in SQLite, constant-time credential verification, and route-level ownership validation for worker operations.
 - Protection against provider-backed identities using the legacy manual GitHub claim path.
 - Validation of legacy task progress/completion payloads and in-progress ownership checks.
 - Coordinator-only API data reads and framework Socket.IO delivery.
@@ -72,6 +72,6 @@ Keep provider ID, step ID, attempt, workspace/revision identity, timestamps, exi
 
 ## Audit conclusion
 
-The source now places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. The access-control boundary still has a shared-agent-key limitation: workers are not individually authenticated. The dashboard/DAG split, in-memory legacy task state, shared-agent-key identity limitation, and provider compatibility remain open implementation risks. Lease expiry and stale-submission fencing are implemented at source level but have not been runtime-tested.
+The source places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. Per-agent credential binding is implemented at source level but has not been runtime-tested. The dashboard/DAG split, in-memory legacy task state, and provider compatibility remain open implementation risks. Lease expiry and stale-submission fencing are also source-reviewed but not runtime-tested.
 
 This is a source-level audit, not a claim that endpoints or provider integrations passed runtime validation. No tests or builds were run, per the project instruction.

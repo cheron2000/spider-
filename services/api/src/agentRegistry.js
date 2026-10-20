@@ -114,6 +114,8 @@ db.exec(`
     ON coordination_peer_reviews(step_id, attempt);
 `);
 
+const agentRegistryColumns=new Set(db.prepare('PRAGMA table_info(agent_registry)').all().map(column=>column.name));
+if(!agentRegistryColumns.has('credential_hash'))db.exec('ALTER TABLE agent_registry ADD COLUMN credential_hash TEXT');
 const coordinationStepColumns=new Set(db.prepare('PRAGMA table_info(coordination_steps)').all().map(column=>column.name));
 for(const [name,type] of [
   ['assigned_at','TEXT'],
@@ -169,10 +171,20 @@ const saveStatement=db.prepare(`
     last_heartbeat=excluded.last_heartbeat
 `);
 const deleteStatement=db.prepare('DELETE FROM agent_registry WHERE id = ?');
+const getCredentialHashStatement=db.prepare('SELECT credential_hash FROM agent_registry WHERE id = ?');
+const setCredentialHashStatement=db.prepare('UPDATE agent_registry SET credential_hash = ? WHERE id = ?');
 
 export class AgentRegistryStore {
   list(){
     return listStatement.all().map(fromRow);
+  }
+
+  getCredentialHash(id){
+    return getCredentialHashStatement.get(id)?.credential_hash||null;
+  }
+
+  setCredentialHash(id,hash){
+    return setCredentialHashStatement.run(hash,id).changes>0;
   }
 
   save(agent){

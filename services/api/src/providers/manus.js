@@ -25,7 +25,12 @@ function collectText(value,out=[],depth=0){
   if(typeof value==='string'){const text=value.trim();if(text)out.push(text);return out;}
   if(Array.isArray(value)){for(const item of value)collectText(item,out,depth+1);return out;}
   if(typeof value==='object'){
-    if(typeof value.text==='string')collectText(value.text,out,depth+1);
+    // Manus v2 nests assistant output under assistant_message.content, not event.content.
+    if(value.assistant_message?.content!==undefined)collectText(value.assistant_message.content,out,depth+1);
+    else if(value.error_message!==undefined)out.push(JSON.stringify(value.error_message));
+    else if(value.structured_output_result!==undefined)out.push(JSON.stringify(value.structured_output_result));
+    else if(value.explanation?.content!==undefined)collectText(value.explanation.content,out,depth+1);
+    else if(typeof value.text==='string')collectText(value.text,out,depth+1);
     else if(typeof value.content==='string')collectText(value.content,out,depth+1);
     else if(Array.isArray(value.content))collectText(value.content,out,depth+1);
     else if(Array.isArray(value.messages))collectText(value.messages,out,depth+1);
@@ -77,7 +82,7 @@ export class ManusAdapter{
     if(!taskId)throw new Error('Manus did not return a task_id.');
     const timeoutMs=Math.max(30000,Math.min(900000,Number.parseInt(process.env.SPIDER_MANUS_TIMEOUT_MS||'300000',10)||300000));
     const endAt=Date.now()+timeoutMs;
-    let lastMessages=[],state='running';
+    let lastMessages=[],state='running',finalTask=null;
     while(Date.now()<endAt){
       const query=new URLSearchParams({task_id:taskId,order:'desc',limit:'50'});
       const result=await requestJson(BASE_URL+'/task.listMessages?'+query.toString(),{
@@ -85,18 +90,36 @@ export class ManusAdapter{
       });
       lastMessages=Array.isArray(result.messages)?result.messages:[];
       state=statusOf(lastMessages);
-      if(state==='stopped'||state==='waiting'||state==='error')break;
+      if(state==='waiting'||state==='error')break;
+      if(state==='stopped'){
+        // The main agent can stop while background jobs continue. Confirm task detail
+        // before Spider records a successful result and unlocks dependent steps.
+        const detail=await requestJson(BASE_URL+'/task.detail?'+new URLSearchParams({task_id:taskId}).toString(),{
+          headers:{'x-manus-api-key':apiKey},timeoutMs:20000
+        });
+        const task=detail?.task;
+        if(task?.status==='waiting'){state='waiting';break;}
+        if(task?.status==='error'){state='error';break;}
+        if(task?.status==='stopped'&&task.has_running_background_jobs!==true){finalTask=task;break;}
+        if(task?.status==='running'||task?.has_running_background_jobs===true){
+          state='running';
+          await wait(Math.max(1500,Math.min(15000,Number.parseInt(process.env.SPIDER_MANUS_POLL_MS||'5000',10)||5000)));
+          continue;
+        }
+        throw new Error('Manus task.detail returned an unrecognized task state; refusing to mark the result complete.');
+      }
       await wait(Math.max(1500,Math.min(15000,Number.parseInt(process.env.SPIDER_MANUS_POLL_MS||'5000',10)||5000)));
     }
     if(state==='running')throw new Error('Manus task exceeded Spider’s configured timeout.');
     const snippets=collectText(lastMessages).filter(text=>text.length>15);
     const summary=redactSecrets(snippets.slice(-6).join('\n\n')).slice(-5000);
-    const taskUrl=typeof created.task_url==='string'?created.task_url:'';
+    const taskUrl=typeof created.task_url==='string'?created.task_url:(typeof finalTask?.task_url==='string'?finalTask.task_url:'');
     const evidence=['provider:manus','manus-task-id:'+taskId];
     if(taskUrl)evidence.push('manus-task-url:'+taskUrl.slice(0,500));
     if(state==='waiting')return {summary:'Manus is waiting for user confirmation or additional input. Do not treat this as completed work.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
     if(state==='error')return {summary:'Manus reported an execution error.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
-    return {summary:summary||'Manus marked the task stopped but returned no readable text; inspect the task URL.',evidence,success:true,providerStatus:'ready'};
+    if(!summary)return {summary:'Manus stopped without returning readable result text. Treat this report as incomplete and inspect the Manus task before approval.',evidence,success:false,providerStatus:'ready'};
+    return {summary,evidence,success:true,providerStatus:'ready'};
     }catch(error){
       if(/HTTP (401|403)|unauthenticated|invalid.*(key|token)|authentication|unauthorized|forbidden/i.test(String(error?.message||''))){
         this.authenticationBlocked=true;

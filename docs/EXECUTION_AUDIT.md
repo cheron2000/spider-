@@ -23,6 +23,7 @@
 - Recalculate agent status after completion, and trigger scheduling after worker registration/heartbeat.
 - Tightened Replit bridge health so a generic HTTP 200 response cannot be mistaken for a ready provider.
 - Expanded CLI authentication-failure detection to cover common 401/403/unauthorized messages.
+- Parse Manus v2 assistant output from its documented event shape and verify task detail/background-job state before considering stopped tasks complete.
 - Documented the remaining boundaries in the provider guide.
 
 ## Findings that remain open
@@ -45,7 +46,7 @@ The GitHub task cache is an in-memory Map. Sync reconstructs tasks from GitHub i
 
 ### P2 — Provider-specific end-to-end compatibility remains unverified
 
-The CLI adapters depend on installed tool versions, flags, native login state, permissions, and output formats. Manus API calls and the custom Replit bridge also need real authenticated execution. Do not enable all adapters at once or treat CLI presence as proof of usable authentication.
+The CLI adapters depend on installed tool versions, flags, native login state, permissions, and output formats. Manus now parses its documented event shape and checks background-job state, but API calls and the custom Replit bridge still need real authenticated execution. Do not enable all adapters at once or treat CLI presence as proof of usable authentication.
 
 ## Audit conclusion
 

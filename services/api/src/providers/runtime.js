@@ -1,3 +1,4 @@
+import path from 'node:path';
 import {redactSecrets} from './base.js';
 
 export class ProviderRuntimeManager {
@@ -14,9 +15,23 @@ export class ProviderRuntimeManager {
   adapter(id){return this.adapters.get(id)||null;}
   activeCount(id){return this.inFlight.get(id)||0;}
 
+  workspaceConflict(id){
+    const adapter=this.adapter(id);
+    if(!adapter||adapter.enabled!==true||typeof adapter.workspace!=='string'||!adapter.workspace.trim())return null;
+    const target=normalizeWorkspacePath(adapter.healthState?.workspaceCanonicalPath||path.resolve(adapter.workspace));
+    for(const other of this.adapters.values()){
+      if(other.id===id||other.enabled!==true||typeof other.workspace!=='string'||!other.workspace.trim())continue;
+      const otherPath=normalizeWorkspacePath(other.healthState?.workspaceCanonicalPath||path.resolve(other.workspace));
+      if(target===otherPath){
+        return 'Configured workspace is shared with enabled provider '+other.label+'; assign each provider a separate workspace directory.';
+      }
+    }
+    return null;
+  }
+
   canAcceptWork(id){
     const adapter=this.adapter(id);
-    return Boolean(adapter&&adapter.healthState?.status==='ready'&&this.activeCount(id)<adapter.maxConcurrentTasks);
+    return Boolean(adapter&&!this.workspaceConflict(id)&&adapter.healthState?.status==='ready'&&this.activeCount(id)<adapter.maxConcurrentTasks);
   }
 
   snapshot(id){
@@ -24,10 +39,11 @@ export class ProviderRuntimeManager {
     if(!adapter)return null;
     const active=this.activeCount(id),capacity=adapter.maxConcurrentTasks;
     const health=adapter.healthState||{};
-    const status=health.status==='ready'&&active>=capacity?'busy':health.status||'offline';
+    const conflict=this.workspaceConflict(id);
+    const status=conflict?'offline':health.status==='ready'&&active>=capacity?'busy':health.status||'offline';
     return {
       id:adapter.id,label:adapter.label,description:adapter.description,
-      status,reason:health.reason||null,checkedAt:health.checkedAt||null,
+      status,reason:conflict||health.reason||null,checkedAt:health.checkedAt||null,
       authState:health.authState||'unknown',workspaceConfigured:Boolean(health.workspaceConfigured),
       activeTasks:active,maxConcurrentTasks:capacity
     };
@@ -79,6 +95,8 @@ export class ProviderRuntimeManager {
   async dispatch(id,work){
     const adapter=this.adapter(id);
     if(!adapter)throw new Error('No provider adapter is registered for this agent.');
+    const workspaceConflict=this.workspaceConflict(id);
+    if(workspaceConflict)throw new Error(workspaceConflict);
     const active=this.activeCount(id);
     if(active>=adapter.maxConcurrentTasks)throw new Error('Provider runtime concurrency limit reached.');
     this.inFlight.set(id,active+1);
@@ -113,4 +131,9 @@ export class ProviderRuntimeManager {
       this.onStateChange(this.snapshot(id));
     }
   }
+}
+
+function normalizeWorkspacePath(value){
+  const normalized=path.normalize(path.resolve(value));
+  return process.platform==='win32'?normalized.toLocaleLowerCase('en-US'):normalized;
 }

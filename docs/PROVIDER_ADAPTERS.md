@@ -36,7 +36,7 @@ SPIDER_CODEX_TIMEOUT_MS=300000
 SPIDER_PROVIDER_POLL_INTERVAL_MS=30000
 ```
 
-The local CLI adapters use a cross-platform subprocess launcher (including Windows CLI shims) and require a dedicated, existing directory for each provider. Spider will not automatically clone a repo, create worktrees, authenticate a CLI, grant provider permissions, or turn on a provider. Keep each workspace isolated from other active agents. The configured workspace is the subprocess working directory; enforcement against access to other filesystem paths still depends on the host/container and that provider's own tool permissions.
+The local CLI adapters use a cross-platform subprocess launcher (including Windows CLI shims) and require a dedicated, existing directory for each provider. Spider resolves existing workspace paths and refuses to dispatch enabled local CLI adapters that resolve to the same physical directory, including paths that resolve through symlinks. Spider will not automatically clone a repo, create worktrees, authenticate a CLI, grant provider permissions, or turn on a provider. Keep each workspace isolated from other active agents. The configured workspace is the subprocess working directory; enforcement against access to other filesystem paths still depends on the host/container and that provider's own tool permissions.
 
 CLI processes receive a conservative environment allowlist by default (PATH, user home and essential OS variables). They do not inherit all API environment variables. If a provider genuinely needs an environment-based credential, explicitly allow only the required variable names with the adapter's `SPIDER_<PROVIDER>_PASSTHROUGH_ENV` setting, for example `SPIDER_CODEX_PASSTHROUGH_ENV=OPENAI_API_KEY`. The variable's value stays out of Spider's HTTP responses, but any tool the provider executes may be able to read variables passed to its process. Prefer CLI-native login/keychain support where possible.
 
@@ -61,7 +61,7 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 3. An enabled, ready adapter marks its corresponding agent available. Disabled or unready adapters remain offline and are excluded from scheduling.
 4. The coordinator assigns a durable step, creates a unique assignment token, persists assignment/expiry/activity timestamps, places the step in the agent's active task list, and dispatches it to the adapter.
 5. While a provider call is active, Spider renews the lease. Results are accepted only if the assignment token remains current and unexpired; the report and transition to `review` are stored atomically. Even successful CLI exit does not approve the work or unlock dependencies. Peer feedback remains advisory and coordinator approval is required.
-6. If an invocation cannot start or times out, the agent work lease is released and the step is returned to `ready` while attempts remain, or marked `failed` when exhausted. The adapter is marked offline until a later health probe makes it available again.
+6. If an invocation fails while its lease is current, Spider records a failed execution report/recovery state and follows the configured attempt policy. An assignment lease that expires before a step starts may be requeued. If it expires after execution has started—or the API restarts during execution—the step is marked `failed` pending coordinator reconciliation rather than automatically retried. A coordinator can explicitly retry with `POST /api/coordinator/steps/:id/retry` and a reconciliation reason; dependent steps must be `done`.
 7. Local CLI adapters are fixed to one concurrent task because each is bound to one writable workspace. Manus and the Replit bridge support bounded remote concurrency (1–3); for Replit, the bridge must provision isolated task workspaces before enabling concurrency above one.
 
 ## Operations and security boundaries
@@ -72,7 +72,9 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 - Coordinator actions stay disabled when `SPIDER_COORDINATOR_API_KEY` is absent, shorter than 32 characters, or a recognized placeholder. External worker routes require a provisioned per-agent credential. Do not deploy with example credentials. GitHub webhooks are rejected until a non-placeholder `GITHUB_WEBHOOK_SECRET` of at least 32 characters is configured.
 - The adapter status `authState: not-probed` means configuration and executable/workspace were found, not that a full authenticated model request has been verified. The first real call is the functional authentication check.
 - The Replit bridge is a separate service that must be built, hosted, and secured for your deployment. Without a valid bridge, the Replit slot remains offline.
-- Lease fencing protects Spider's SQLite coordination state; it does not undo external side effects from a worker whose lease expired. Work that is not safe to repeat needs task-specific idempotency or compensation.
+- Expired leases are only automatically requeued for work that never started. Started work is failed closed until coordinator-directed recovery because lease fencing does not undo filesystem, deployment, or other external side effects.
+- A currently executing provider step is excluded from the lease-recovery sweep until that invocation exits; it cannot be reassigned to a parallel provider run while the old invocation remains active.
+- Enabled local CLI adapters cannot share the same canonical workspace path. This prevents accidental same-directory concurrent edits; it is not an OS sandbox. Provider CLIs can still reach paths permitted by their own permissions and host/container boundary.
 - No tests or builds were run as part of this change, in keeping with the instruction to skip testing for now.
 
 ## Official command/API references
@@ -113,6 +115,8 @@ Issues addressed in the audit commit:
 - Require agent authentication and identity matching for heartbeat, claim, progress, and completion; reject duplicate/non-owned task mutation and provider-backed manual claims.
 - Re-run scheduling when a worker registers or heartbeats back online, so ready coordination steps do not wait unnecessarily for a manual advance.
 - Require a Replit bridge health response to explicitly report `ok: true` or `ready: true`, and recognize more common CLI HTTP authentication failures.
+- Bind each external worker to a distinct credential; reject automatic retries of expired in-progress work until a coordinator reconciles possible side effects.
+- Block dispatch when enabled local CLI provider adapters share a canonical workspace directory.
 - Parse Manus v2's documented `assistant_message.content` output shape and verify task detail and require an explicit no-background-jobs state before treating stopped tasks as successful.
 
 Known blockers after source review:

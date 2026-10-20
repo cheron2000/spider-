@@ -420,10 +420,13 @@ const reviewReportStatement=db.prepare(`
 `);
 const recoverStepsStatement=db.prepare(`
  UPDATE coordination_steps SET
-  status=CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'ready' END,
+  status=CASE WHEN status='in_progress' OR attempts >= max_attempts THEN 'failed' ELSE 'ready' END,
   assigned_agent=NULL,assignment_token=NULL,lease_expires_at=NULL,
   last_activity_at=@now,
-  review_feedback='Recovered after API restart before submission; reassigning safely.',
+  review_feedback=CASE
+   WHEN status='in_progress' THEN 'Recovered after API restart during execution; automatic retry blocked until coordinator reconciles possible external side effects.'
+   ELSE 'Recovered after API restart before execution; assignment revoked and safe to requeue.'
+  END,
   updated_at=@now,started_at=NULL,submitted_at=NULL
  WHERE status IN ('assigned','in_progress')
 `);
@@ -453,9 +456,12 @@ const findExpiredStepsStatement=db.prepare(`
 `);
 const expireStepStatement=db.prepare(`
  UPDATE coordination_steps SET
-  status=CASE WHEN attempts>=max_attempts THEN 'failed' ELSE 'ready' END,
+  status=CASE WHEN status='in_progress' OR attempts>=max_attempts THEN 'failed' ELSE 'ready' END,
   assigned_agent=NULL,assignment_token=NULL,lease_expires_at=NULL,last_activity_at=@now,
-  review_feedback='Assignment lease expired before submission; prior assignment revoked.',
+  review_feedback=CASE
+   WHEN status='in_progress' THEN 'Assignment lease expired during execution; automatic retry blocked until coordinator reconciles possible external side effects.'
+   ELSE 'Assignment lease expired before execution; assignment revoked and safe to requeue.'
+  END,
   updated_at=@now,started_at=NULL,submitted_at=NULL
  WHERE id=@id AND status IN ('assigned','in_progress')
   AND lease_expires_at IS NOT NULL AND lease_expires_at<=@now
@@ -531,11 +537,12 @@ export class CoordinationStore {
     return submitStepWithLeaseTransaction({stepId,agentId,assignmentToken,attempt,summary,evidence,reportId,now});
   }
 
-  recoverExpiredLeases(now=new Date().toISOString()) {
+  recoverExpiredLeases(now=new Date().toISOString(),{excludeStepIds=new Set()}={}) {
     const recover=db.transaction(()=>{
       const expired=findExpiredStepsStatement.all(now);
       const recovered=[];
       for(const row of expired){
+        if(excludeStepIds.has(row.id))continue;
         if(expireStepStatement.run({id:row.id,now}).changes){
           recovered.push({agentId:row.assigned_agent,step:this.getStep(row.id)});
         }

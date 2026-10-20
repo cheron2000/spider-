@@ -1,4 +1,4 @@
-import {access,stat} from 'node:fs/promises';
+import {access,realpath,stat} from 'node:fs/promises';
 import spawn from 'cross-spawn';
 import path from 'node:path';
 
@@ -167,7 +167,7 @@ export async function inspectWorkspace(workspace) {
     await access(resolved);
     const info=await stat(resolved);
     if(!info.isDirectory())return {ok:false,reason:'Configured workspace path is not a directory.'};
-    return {ok:true,path:resolved};
+    return {ok:true,path:resolved,canonicalPath:await realpath(resolved)};
   } catch {
     return {ok:false,reason:'Configured workspace directory does not exist or is not accessible.'};
   }
@@ -227,7 +227,7 @@ export class CommandProviderAdapter {
     if(!this.command)return this.healthState={status:'offline',reason:'No CLI executable is configured.',checkedAt,authState:'unknown'};
     const executable=await probeExecutable(this.command,this.childEnv());
     if(!executable.ok)return this.healthState={status:'offline',reason:executable.reason,checkedAt,authState:'unknown'};
-    return this.healthState={status:'ready',reason:null,checkedAt,authState:'not-probed',workspaceConfigured:true};
+    return this.healthState={status:'ready',reason:null,checkedAt,authState:'not-probed',workspaceConfigured:true,workspaceCanonicalPath:workspace.canonicalPath};
   }
   async runTask(work){
     const workspace=await inspectWorkspace(this.workspace);

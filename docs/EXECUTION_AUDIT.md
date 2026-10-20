@@ -42,11 +42,11 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 
 The dashboard's New Objective UI calls `POST /api/ceo/plan`, which creates GitHub issues. Provider execution uses the separate authenticated `/api/coordinator/plans` and `/api/coordinator/plans/draft` endpoints. The visible dashboard does not yet provide a complete create-plan → provider execution → report review workflow. GitHub issue creation must not be described as automatically launching provider work.
 
-### P1 — Lease expiry does not guarantee task idempotency
+### P1 — Lease expiry cannot cancel external side effects
 
-Coordination steps now persist assignment time, last activity, lease expiry, and a unique assignment token. External workers renew leases through the step heartbeat endpoint; start and report submission are token-fenced, and submission changes the step plus stores its report in one SQLite transaction. Expired leases revoke the token before requeueing eligible attempts; attempts at the configured limit become failed. Provider execution renews its lease while active and submits through the same token-fenced persistence path.
+Coordination steps persist assignment time, last activity, lease expiry, and a unique assignment token. Start and submission are token-fenced, and reports are saved atomically. An expired assignment that never started may be requeued within the attempt budget. Once a step entered `in_progress`, lease expiry or API restart marks it failed instead of automatically retrying, because work may already have changed files or external systems. A coordinator must explicitly retry a failed step using `POST /api/coordinator/steps/:id/retry` with a reconciliation reason; that route requires all dependencies to be done and adds one attempt to the allowed budget.
 
-Lease expiry prevents a stale worker from changing Spider's coordination state, but it cannot undo file edits, deployments, or other external side effects the worker already performed. Retries of non-idempotent tasks still require workspace isolation and task-specific recovery or compensation.
+The lease sweeper defers an expired step while its provider invocation is still active in the current process. After that invocation exits, the lease is reconciled before any retry can be scheduled. Assignment-token fencing still cannot undo external side effects. A retry is safe only after the coordinator reconciles those effects or applies task-specific compensation.
 
 ### P1 — Legacy GitHub task state is in memory
 
@@ -72,6 +72,6 @@ Keep provider ID, step ID, attempt, workspace/revision identity, timestamps, exi
 
 ## Audit conclusion
 
-The source places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. Per-agent credential binding is implemented at source level but has not been runtime-tested. The dashboard/DAG split, in-memory legacy task state, and provider compatibility remain open implementation risks. Lease expiry and stale-submission fencing are also source-reviewed but not runtime-tested.
+The source places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. Per-agent credential binding, local workspace collision blocking, and explicit recovery of expired in-progress steps are implemented at source level but not runtime-tested. The dashboard/DAG split, in-memory legacy task state, provider compatibility, and the limits of containing external side effects remain open risks.
 
 This is a source-level audit, not a claim that endpoints or provider integrations passed runtime validation. No tests or builds were run, per the project instruction.

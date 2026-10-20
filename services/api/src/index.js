@@ -359,8 +359,8 @@ function advanceCoordinationPlan(planId){
  return {plan,assigned,unassigned,terminal:plan.status==='completed'||plan.status==='failed'};
 }
 
-// Reconcile interrupted leases at startup. Restored agents are offline, so work
-// returns to the ready queue and is reassigned only after an agent reconnects.
+// Reconcile interrupted leases at startup. Work that never started may be requeued;
+// interrupted execution is failed closed until the coordinator reconciles side effects.
 function advanceOtherCoordinationPlans(excludedPlanId){
  const plans=coordinationStore.listPlans(1000)
   .filter(plan=>(excludedPlanId===null||plan.id!==excludedPlanId)&&!['completed','failed'].includes(plan.status))
@@ -453,6 +453,9 @@ async function executeProviderAssignment(agentId,assignment){
  }finally{
   if(leaseHeartbeat)clearInterval(leaseHeartbeat);
   providerRuns.delete(runKey);
+  // A lease sweeper may have deferred this active invocation. Once it exits, reconcile
+  // its expired lease before considering any retry or reassignment.
+  sweepExpiredAssignmentLeases();
   const pending=pendingProviderAssignments.get(runKey);
   if(pending){
    pendingProviderAssignments.delete(runKey);
@@ -627,6 +630,35 @@ app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  const scheduling=advanceCoordinationPlan(step.planId);
  advanceOtherCoordinationPlans(step.planId);
  res.status(202).json({step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,note:'Submission saved for coordinator review; dependencies remain blocked until approval.'});
+});
+app.post('/api/coordinator/steps/:id/retry',requireCoordinator,(req,res)=>{
+ const parsed=z.object({
+  reason:z.string().trim().min(12).max(2000)
+ }).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.status!=='failed')return res.status(409).json({error:'Only failed steps can be retried after reconciliation.',status:step.status});
+ const plan=coordinationStore.getPlan(step.planId);
+ if(!plan)return res.status(404).json({error:'Parent coordination plan not found.'});
+ const dependenciesReady=(step.dependsOn||[]).every(key=>plan.steps.some(parent=>parent.key===key&&parent.status==='done'));
+ if(!dependenciesReady)return res.status(409).json({error:'Resolve or retry failed dependencies first; every dependency must be done before this retry.'});
+ const now=new Date().toISOString();
+ const updated=coordinationStore.updateStep({
+  ...step,status:'ready',assignedAgent:null,maxAttempts:Math.max(step.maxAttempts,step.attempts+1),
+  resultSummary:null,evidence:[],
+  reviewFeedback:'Coordinator-authorized retry after side-effect reconciliation: '+parsed.data.reason,
+  updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null,assignedAt:null,
+  leaseExpiresAt:null,lastActivityAt:now,assignmentToken:null
+ });
+ coordinationStore.updatePlanStatus(step.planId,'planned',now);
+ emit('coordination.step.retry_authorized',{planId:step.planId,stepId:step.id,key:step.key,reason:parsed.data.reason,previousAttempts:step.attempts});
+ const scheduling=advanceCoordinationPlan(step.planId);
+ advanceOtherCoordinationPlans(step.planId);
+ res.status(202).json({
+  step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,
+  note:'Retry authorized. Confirm that possible side effects from the previous execution were reconciled before accepting the new result.'
+ });
 });
 app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
  const parsed=z.object({
@@ -847,7 +879,7 @@ io.on('connection',s=>{
  });
 function sweepExpiredAssignmentLeases(){
  try{
-  const recovered=coordinationStore.recoverExpiredLeases(new Date().toISOString());
+  const recovered=coordinationStore.recoverExpiredLeases(new Date().toISOString(),{excludeStepIds:new Set(providerRuns)});
   for(const item of recovered){
    const step=item.step;
    const agent=item.agentId?agents.get(item.agentId):null;

@@ -409,7 +409,7 @@ async function executeProviderAssignment(agentId,assignment){
      latest.assignmentToken!==assignment.assignmentToken||!latest.leaseExpiresAt||
      Date.parse(latest.leaseExpiresAt)<=Date.now())return;
   const submittedAt=new Date().toISOString();
-  const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\\n\\n'+result.summary;
+  const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\n\n'+result.summary;
   const evidence=[...result.evidence,result.success?'provider-result:success':'provider-result:needs-review'];
   const submitted=coordinationStore.submitWithLease({
    stepId:latest.id,agentId,assignmentToken:assignment.assignmentToken,attempt:latest.attempts,

@@ -106,7 +106,7 @@ Issues addressed in the audit commit:
 - Require agent authentication and identity matching for heartbeat, claim, progress, and completion; reject duplicate/non-owned task mutation and provider-backed manual claims.
 - Re-run scheduling when a worker registers or heartbeats back online, so ready coordination steps do not wait unnecessarily for a manual advance.
 - Require a Replit bridge health response to explicitly report `ok: true` or `ready: true`, and recognize more common CLI HTTP authentication failures.
-- Parse Manus v2's documented `assistant_message.content` output shape and verify task detail/background-job state before treating stopped tasks as successful.
+- Parse Manus v2's documented `assistant_message.content` output shape and verify task detail and require an explicit no-background-jobs state before treating stopped tasks as successful.
 
 Known blockers after source review:
 - Dashboard objective creation and the durable provider DAG are still separate workflows.

@@ -46,7 +46,7 @@ The GitHub task cache is an in-memory Map. Sync reconstructs tasks from GitHub i
 
 ### P2 — Provider-specific end-to-end compatibility remains unverified
 
-The CLI adapters depend on installed tool versions, flags, native login state, permissions, and output formats. Manus now parses its documented event shape and checks background-job state, but API calls and the custom Replit bridge still need real authenticated execution. Do not enable all adapters at once or treat CLI presence as proof of usable authentication.
+The CLI adapters depend on installed tool versions, flags, native login state, permissions, and output formats. Manus now parses its documented event shape and checks background-job state, treating a missing background-job indicator as incomplete, but API calls and the custom Replit bridge still need real authenticated execution. Do not enable all adapters at once or treat CLI presence as proof of usable authentication.
 
 ## Audit conclusion
 

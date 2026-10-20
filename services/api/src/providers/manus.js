@@ -100,7 +100,8 @@ export class ManusAdapter{
         const task=detail?.task;
         if(task?.status==='waiting'){state='waiting';break;}
         if(task?.status==='error'){state='error';break;}
-        if(task?.status==='stopped'&&task.has_running_background_jobs!==true){finalTask=task;break;}
+        if(task?.status==='stopped'&&task.has_running_background_jobs===false){finalTask=task;break;}
+        if(task?.status==='stopped'&&task.has_running_background_jobs===undefined){state='unknown';finalTask=task;break;}
         if(task?.status==='running'||task?.has_running_background_jobs===true){
           state='running';
           await wait(Math.max(1500,Math.min(15000,Number.parseInt(process.env.SPIDER_MANUS_POLL_MS||'5000',10)||5000)));
@@ -118,6 +119,7 @@ export class ManusAdapter{
     if(taskUrl)evidence.push('manus-task-url:'+taskUrl.slice(0,500));
     if(state==='waiting')return {summary:'Manus is waiting for user confirmation or additional input. Do not treat this as completed work.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
     if(state==='error')return {summary:'Manus reported an execution error.\n\n'+summary,evidence,success:false,providerStatus:'ready'};
+    if(state==='unknown')return {summary:'Manus stopped, but task.detail omitted has_running_background_jobs. Treat this report as incomplete until the task is manually verified.\\n\\n'+summary,evidence,success:false,providerStatus:'ready'};
     if(!summary)return {summary:'Manus stopped without returning readable result text. Treat this report as incomplete and inspect the Manus task before approval.',evidence,success:false,providerStatus:'ready'};
     return {summary,evidence,success:true,providerStatus:'ready'};
     }catch(error){

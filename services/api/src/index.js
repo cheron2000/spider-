@@ -21,10 +21,13 @@ const octokit=process.env.GITHUB_TOKEN?new Octokit({auth:process.env.GITHUB_TOKE
 const agentStore=new AgentRegistryStore();
 const messageStore=new AgentMessageStore();
 const coordinationStore=new CoordinationStore();
+const assignmentLeaseMs=Math.max(30000,Math.min(3600000,Number.parseInt(process.env.SPIDER_ASSIGNMENT_LEASE_MS||'120000',10)||120000));
+function leaseExpiryFrom(now){return new Date(Date.parse(now)+assignmentLeaseMs).toISOString();}
 const tasks=new Map();
 const agents=new Map(agentStore.list().map(agent=>[agent.id,{...agent,status:'offline',currentTasks:[]}]));
 const events=[];
 const providerRuns=new Set();
+const pendingProviderAssignments=new Map();
 const providerRuntime=new ProviderRuntimeManager(createProviderAdapters(),{
  onStateChange:handleProviderStateChange,
  pollIntervalMs:Math.max(10000,Math.min(120000,Number.parseInt(process.env.SPIDER_PROVIDER_POLL_INTERVAL_MS||'30000',10)||30000))
@@ -323,15 +326,17 @@ function advanceCoordinationPlan(planId){
   const agent=availableAgentForStep(step);
   if(!agent){unassigned.push(step.key);continue;}
   const now=new Date().toISOString();
+  const assignmentToken=crypto.randomBytes(32).toString('base64url');
   const updatedStep=coordinationStore.updateStep({
    ...step,status:'assigned',assignedAgent:agent.id,attempts:step.attempts+1,
-   resultSummary:null,evidence:[],updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null
+   resultSummary:null,evidence:[],updatedAt:now,startedAt:null,submittedAt:null,reviewedAt:null,
+   assignedAt:now,leaseExpiresAt:leaseExpiryFrom(now),lastActivityAt:now,assignmentToken
   });
   const workloadId='coord:'+step.id;
   if(!agent.currentTasks.includes(workloadId))agent.currentTasks.push(workloadId);
   agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
   agentStore.save(agent);
-  const assignment={kind:'coordination_step',planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,description:updatedStep.description,dependsOn:updatedStep.dependsOn,attempt:updatedStep.attempts,maxAttempts:updatedStep.maxAttempts};
+  const assignment={kind:'coordination_step',planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,description:updatedStep.description,dependsOn:updatedStep.dependsOn,attempt:updatedStep.attempts,maxAttempts:updatedStep.maxAttempts,assignmentToken:updatedStep.assignmentToken,leaseExpiresAt:updatedStep.leaseExpiresAt};
   io.to('agent:'+agent.id).emit('agent:work',assignment);
   emit('coordination.step.assigned',{planId,stepId:updatedStep.id,key:updatedStep.key,title:updatedStep.title,agentId:agent.id,agentName:agent.name,attempt:updatedStep.attempts});
   assigned.push({stepId:updatedStep.id,key:updatedStep.key,agentId:agent.id,agentName:agent.name});
@@ -367,31 +372,50 @@ function releaseProviderWork(agentId,stepId){
 
 async function executeProviderAssignment(agentId,assignment){
  const runKey=assignment.stepId;
- if(providerRuns.has(runKey))return;
+ if(providerRuns.has(runKey)){
+  pendingProviderAssignments.set(runKey,{agentId,assignment});
+  return;
+ }
  providerRuns.add(runKey);
+ let leaseHeartbeat=null;
+ let leaseLost=false;
  try{
   let step=coordinationStore.getStep(assignment.stepId);
   const agent=agents.get(agentId);
-  if(!step||!agent||!agent.providerId||step.status!=='assigned'||step.assignedAgent!==agentId)return;
-  const startedAt=new Date().toISOString();
-  step=coordinationStore.updateStep({...step,status:'in_progress',startedAt,updatedAt:startedAt});
+  const now=new Date().toISOString();
+  if(!step||!agent||!agent.providerId||step.status!=='assigned'||step.assignedAgent!==agentId||
+     !assignment.assignmentToken||step.assignmentToken!==assignment.assignmentToken||
+     !step.leaseExpiresAt||Date.parse(step.leaseExpiresAt)<=Date.now())return;
+  step=coordinationStore.startWithLease({
+   stepId:step.id,agentId,assignmentToken:assignment.assignmentToken,now,leaseExpiresAt:leaseExpiryFrom(now)
+  });
+  if(!step)return;
+  leaseHeartbeat=setInterval(()=>{
+   const heartbeatAt=new Date().toISOString();
+   const renewed=coordinationStore.renewLease({
+    stepId:assignment.stepId,agentId,assignmentToken:assignment.assignmentToken,
+    now:heartbeatAt,leaseExpiresAt:leaseExpiryFrom(heartbeatAt)
+   });
+   if(!renewed)leaseLost=true;
+  },Math.max(10000,Math.floor(assignmentLeaseMs/3)));
+  leaseHeartbeat.unref?.();
   refreshCoordinationPlanStatus(step.planId);
   emit('coordination.step.started',{planId:step.planId,stepId:step.id,key:step.key,agentId,providerId:agent.providerId});
   const plan=coordinationStore.getPlan(step.planId);
-  const result=await providerRuntime.dispatch(agent.providerId,{...assignment,planObjective:plan?.objective||''});
+  const {assignmentToken:_assignmentToken,leaseExpiresAt:_leaseExpiresAt,...providerAssignment}=assignment;
+  const result=await providerRuntime.dispatch(agent.providerId,{...providerAssignment,planObjective:plan?.objective||''});
   const latest=coordinationStore.getStep(step.id);
-  if(!latest||latest.status!=='in_progress'||latest.assignedAgent!==agentId)return;
+  if(leaseLost||!latest||latest.status!=='in_progress'||latest.assignedAgent!==agentId||
+     latest.assignmentToken!==assignment.assignmentToken||!latest.leaseExpiresAt||
+     Date.parse(latest.leaseExpiresAt)<=Date.now())return;
   const submittedAt=new Date().toISOString();
-  const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\n\n'+result.summary;
+  const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\\n\\n'+result.summary;
   const evidence=[...result.evidence,result.success?'provider-result:success':'provider-result:needs-review'];
-  coordinationStore.addReport({
-   id:crypto.randomUUID(),stepId:latest.id,attempt:latest.attempts,agentId,
-   summary,evidence:evidence.slice(0,30),submittedAt
+  const submitted=coordinationStore.submitWithLease({
+   stepId:latest.id,agentId,assignmentToken:assignment.assignmentToken,attempt:latest.attempts,
+   summary,evidence:evidence.slice(0,30),reportId:crypto.randomUUID(),now:submittedAt
   });
-  const submitted=coordinationStore.updateStep({
-   ...latest,status:'review',resultSummary:summary,evidence:evidence.slice(0,30),
-   submittedAt,updatedAt:submittedAt,reviewFeedback:null
-  });
+  if(!submitted)return;
   releaseProviderWork(agentId,latest.id);
   emit('coordination.step.submitted',{
    planId:latest.planId,stepId:latest.id,key:latest.key,agentId,title:latest.title,
@@ -400,13 +424,15 @@ async function executeProviderAssignment(agentId,assignment){
   return submitted;
  }catch(error){
   const latest=coordinationStore.getStep(assignment.stepId);
-  if(latest&&latest.assignedAgent===agentId&&['assigned','in_progress'].includes(latest.status)){
+  if(latest&&latest.assignmentToken===assignment.assignmentToken&&latest.assignedAgent===agentId&&
+     ['assigned','in_progress'].includes(latest.status)&&latest.leaseExpiresAt&&
+     Date.parse(latest.leaseExpiresAt)>Date.now()){
    const now=new Date().toISOString();
    const exhausted=latest.attempts>=latest.maxAttempts;
    const feedback='Provider runtime failed; work was not accepted. '+redactSecrets(error?.message||'Unknown adapter failure').slice(0,500);
    coordinationStore.updateStep({
-    ...latest,status:exhausted?'failed':'ready',assignedAgent:null,
-    reviewFeedback:feedback,startedAt:null,submittedAt:null,updatedAt:now
+    ...latest,status:exhausted?'failed':'ready',assignedAgent:null,assignmentToken:null,leaseExpiresAt:null,
+    lastActivityAt:now,reviewFeedback:feedback,startedAt:null,submittedAt:null,updatedAt:now
    });
    releaseProviderWork(agentId,latest.id);
    emit('coordination.step.runtime_failed',{
@@ -416,7 +442,13 @@ async function executeProviderAssignment(agentId,assignment){
    });
   }
  }finally{
+  if(leaseHeartbeat)clearInterval(leaseHeartbeat);
   providerRuns.delete(runKey);
+  const pending=pendingProviderAssignments.get(runKey);
+  if(pending){
+   pendingProviderAssignments.delete(runKey);
+   queueMicrotask(()=>{void executeProviderAssignment(pending.agentId,pending.assignment);});
+  }
   const latest=coordinationStore.getStep(assignment.stepId);
   if(latest){
    advanceCoordinationPlan(latest.planId);
@@ -526,20 +558,41 @@ app.post('/api/coordinator/steps/:id/peer-review',requireMessageAgent,(req,res)=
  emit('coordination.peer_review.submitted',{planId:step.planId,stepId:step.id,key:step.key,reviewerAgent:req.spiderAgent.id,authorAgent:step.assignedAgent,decision:review.decision});
  res.status(201).json({review,note:'Peer feedback is advisory; the coordinator retains final approval authority.'});
 });
-app.post('/api/coordinator/steps/:id/start',requireMessageAgent,(req,res)=>{
+app.post('/api/coordinator/steps/:id/heartbeat',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({assignmentToken:z.string().min(32).max(256)}).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
  const step=coordinationStore.getStep(req.params.id);
  if(!step)return res.status(404).json({error:'Coordination step not found.'});
  if(step.assignedAgent!==req.spiderAgent.id)return res.status(403).json({error:'Step is assigned to another agent.'});
- if(step.status==='in_progress')return res.json({step,note:'Step is already in progress.'});
- if(step.status!=='assigned')return res.status(409).json({error:'Only assigned steps can be started.',status:step.status});
  const now=new Date().toISOString();
- const updated=coordinationStore.updateStep({...step,status:'in_progress',startedAt:now,updatedAt:now});
+ const renewed=coordinationStore.renewLease({
+  stepId:step.id,agentId:req.spiderAgent.id,assignmentToken:parsed.data.assignmentToken,
+  now,leaseExpiresAt:leaseExpiryFrom(now)
+ });
+ if(!renewed)return res.status(409).json({error:'Assignment lease expired or revoked. Fetch the current work queue before continuing.'});
+ req.spiderAgent.lastHeartbeat=now;
+ agentStore.save(req.spiderAgent);
+ res.json({step:renewed});
+});
+app.post('/api/coordinator/steps/:id/start',requireMessageAgent,(req,res)=>{
+ const parsed=z.object({assignmentToken:z.string().min(32).max(256)}).safeParse(req.body||{});
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const step=coordinationStore.getStep(req.params.id);
+ if(!step)return res.status(404).json({error:'Coordination step not found.'});
+ if(step.assignedAgent!==req.spiderAgent.id)return res.status(403).json({error:'Step is assigned to another agent.'});
+ const now=new Date().toISOString();
+ const updated=coordinationStore.startWithLease({
+  stepId:step.id,agentId:req.spiderAgent.id,assignmentToken:parsed.data.assignmentToken,
+  now,leaseExpiresAt:leaseExpiryFrom(now)
+ });
+ if(!updated)return res.status(409).json({error:'Assignment lease expired or revoked. Fetch the current work queue before continuing.'});
  refreshCoordinationPlanStatus(step.planId);
  emit('coordination.step.started',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id});
  res.json({step:updated});
 });
 app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  const parsed=z.object({
+  assignmentToken:z.string().min(32).max(256),
   summary:z.string().trim().min(1).max(5000),
   evidence:z.array(z.string().trim().min(1).max(500)).max(30).default([])
  }).safeParse(req.body);
@@ -549,8 +602,12 @@ app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  if(step.assignedAgent!==req.spiderAgent.id)return res.status(403).json({error:'Step is assigned to another agent.'});
  if(!['assigned','in_progress'].includes(step.status))return res.status(409).json({error:'Step is not accepting a submission.',status:step.status});
  const now=new Date().toISOString();
- coordinationStore.addReport({id:crypto.randomUUID(),stepId:step.id,attempt:step.attempts,agentId:req.spiderAgent.id,summary:parsed.data.summary,evidence:parsed.data.evidence,submittedAt:now});
- const updated=coordinationStore.updateStep({...step,status:'review',resultSummary:parsed.data.summary,evidence:parsed.data.evidence,submittedAt:now,updatedAt:now,reviewFeedback:null});
+ const updated=coordinationStore.submitWithLease({
+  stepId:step.id,agentId:req.spiderAgent.id,assignmentToken:parsed.data.assignmentToken,
+  attempt:step.attempts,summary:parsed.data.summary,evidence:parsed.data.evidence,
+  reportId:crypto.randomUUID(),now
+ });
+ if(!updated)return res.status(409).json({error:'Assignment lease expired or revoked; this result was not accepted.'});
  const agent=agents.get(req.spiderAgent.id);
  if(agent){
   agent.currentTasks=agent.currentTasks.filter(id=>id!=='coord:'+step.id);
@@ -758,6 +815,35 @@ io.on('connection',s=>{
  }
  if(coordinatorAuthorized)s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
  });
+function sweepExpiredAssignmentLeases(){
+ try{
+  const recovered=coordinationStore.recoverExpiredLeases(new Date().toISOString());
+  for(const item of recovered){
+   const step=item.step;
+   const agent=item.agentId?agents.get(item.agentId):null;
+   if(agent){
+    agent.currentTasks=agent.currentTasks.filter(id=>id!=='coord:'+step.id);
+    const runtime=agent.providerId?providerRuntime.snapshot(agent.providerId):null;
+    const runtimeReady=runtime&&['ready','busy'].includes(runtime.status);
+    agent.status=agent.providerId?(runtimeReady?(agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available'):'offline'):
+     (agent.status==='offline'?'offline':agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available');
+    agent.lastHeartbeat=new Date().toISOString();
+    agentStore.save(agent);
+   }
+   emit('coordination.step.lease_expired',{
+    planId:step.planId,stepId:step.id,key:step.key,previousAgentId:item.agentId,
+    attempt:step.attempts,status:step.status,requeued:step.status==='ready'
+   });
+   advanceCoordinationPlan(step.planId);
+  }
+  if(recovered.length)advanceOtherCoordinationPlans(null);
+ }catch(error){
+  console.error('Assignment lease sweep failed:',redactSecrets(error?.message||'unknown error'));
+ }
+}
+const leaseSweepTimer=setInterval(sweepExpiredAssignmentLeases,Math.min(15000,Math.max(1000,Math.floor(assignmentLeaseMs/4))));
+leaseSweepTimer.unref?.();
+
 if(octokit)sync().catch(e=>console.error('Initial GitHub sync failed:',e.message));
 const port=Number(process.env.PORT||4000);server.listen(port,()=>{
  console.log('Universal Agent API listening at http://localhost:'+port);

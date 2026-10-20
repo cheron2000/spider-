@@ -74,6 +74,10 @@ db.exec(`
     started_at TEXT,
     submitted_at TEXT,
     reviewed_at TEXT,
+    assigned_at TEXT,
+    lease_expires_at TEXT,
+    last_activity_at TEXT,
+    assignment_token TEXT,
     UNIQUE(plan_id, step_key)
   );
   CREATE INDEX IF NOT EXISTS idx_coordination_steps_plan
@@ -109,6 +113,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_coordination_peer_reviews_step
     ON coordination_peer_reviews(step_id, attempt);
 `);
+
+const coordinationStepColumns=new Set(db.prepare('PRAGMA table_info(coordination_steps)').all().map(column=>column.name));
+for(const [name,type] of [
+  ['assigned_at','TEXT'],
+  ['lease_expires_at','TEXT'],
+  ['last_activity_at','TEXT'],
+  ['assignment_token','TEXT'],
+]){
+  if(!coordinationStepColumns.has(name))db.exec('ALTER TABLE coordination_steps ADD COLUMN '+name+' '+type);
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_coordination_steps_lease ON coordination_steps(status, lease_expires_at)');
 
 function parseJson(value,fallback){
   try{return JSON.parse(value);}catch{return fallback;}
@@ -299,6 +314,10 @@ function fromCoordinationStep(row){
     startedAt:row.started_at,
     submittedAt:row.submitted_at,
     reviewedAt:row.reviewed_at,
+    assignedAt:row.assigned_at,
+    leaseExpiresAt:row.lease_expires_at,
+    lastActivityAt:row.last_activity_at,
+    assignmentToken:row.assignment_token,
   };
 }
 
@@ -351,7 +370,9 @@ const updateStepStatement=db.prepare(`
   UPDATE coordination_steps SET
     status=@status,assigned_agent=@assignedAgent,attempts=@attempts,max_attempts=@maxAttempts,
     result_summary=@resultSummary,evidence_json=@evidenceJson,review_feedback=@reviewFeedback,
-    updated_at=@updatedAt,started_at=@startedAt,submitted_at=@submittedAt,reviewed_at=@reviewedAt
+    updated_at=@updatedAt,started_at=@startedAt,submitted_at=@submittedAt,reviewed_at=@reviewedAt,
+    assigned_at=@assignedAt,lease_expires_at=@leaseExpiresAt,last_activity_at=@lastActivityAt,
+    assignment_token=@assignmentToken
   WHERE id=@id
 `);
 const insertReportStatement=db.prepare(`
@@ -359,6 +380,18 @@ const insertReportStatement=db.prepare(`
     (id,step_id,attempt,agent_id,summary,evidence_json,submitted_at)
   VALUES (@id,@stepId,@attempt,@agentId,@summary,@evidenceJson,@submittedAt)
 `);
+const submitStepWithLeaseTransaction=db.transaction(data=>{
+  const changed=submitStepLeaseStatement.run({
+    id:data.stepId,agentId:data.agentId,assignmentToken:data.assignmentToken,
+    now:data.now,summary:data.summary,evidenceJson:JSON.stringify(data.evidence||[])
+  });
+  if(!changed.changes)return null;
+  insertReportStatement.run({
+    id:data.reportId,stepId:data.stepId,attempt:data.attempt,agentId:data.agentId,
+    summary:data.summary,evidenceJson:JSON.stringify(data.evidence||[]),submittedAt:data.now
+  });
+  return fromCoordinationStep(findStepStatement.get(data.stepId));
+});
 const findReportForAttemptStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? AND attempt = ?');
 const listReportsForStepStatement=db.prepare('SELECT * FROM coordination_step_reports WHERE step_id = ? ORDER BY attempt');
 const insertPeerReviewStatement=db.prepare(`
@@ -376,10 +409,44 @@ const reviewReportStatement=db.prepare(`
 const recoverStepsStatement=db.prepare(`
  UPDATE coordination_steps SET
   status=CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'ready' END,
-  assigned_agent=NULL,
+  assigned_agent=NULL,assignment_token=NULL,lease_expires_at=NULL,
+  last_activity_at=@now,
   review_feedback='Recovered after API restart before submission; reassigning safely.',
   updated_at=@now,started_at=NULL,submitted_at=NULL
  WHERE status IN ('assigned','in_progress')
+`);
+const renewStepLeaseStatement=db.prepare(`
+ UPDATE coordination_steps SET lease_expires_at=@leaseExpiresAt,last_activity_at=@now,updated_at=@now
+ WHERE id=@id AND assigned_agent=@agentId AND assignment_token=@assignmentToken
+  AND status IN ('assigned','in_progress') AND lease_expires_at>@now
+`);
+const startStepLeaseStatement=db.prepare(`
+ UPDATE coordination_steps SET status='in_progress',
+  started_at=COALESCE(started_at,@now),lease_expires_at=@leaseExpiresAt,
+  last_activity_at=@now,updated_at=@now
+ WHERE id=@id AND assigned_agent=@agentId AND assignment_token=@assignmentToken
+  AND status IN ('assigned','in_progress') AND lease_expires_at>@now
+`);
+const submitStepLeaseStatement=db.prepare(`
+ UPDATE coordination_steps SET status='review',result_summary=@summary,evidence_json=@evidenceJson,
+  review_feedback=NULL,updated_at=@now,submitted_at=@now,last_activity_at=@now,
+  lease_expires_at=NULL,assignment_token=NULL
+ WHERE id=@id AND assigned_agent=@agentId AND assignment_token=@assignmentToken
+  AND status IN ('assigned','in_progress') AND lease_expires_at>@now
+`);
+const findExpiredStepsStatement=db.prepare(`
+ SELECT id,assigned_agent FROM coordination_steps
+ WHERE status IN ('assigned','in_progress') AND lease_expires_at IS NOT NULL AND lease_expires_at<=?
+ ORDER BY lease_expires_at
+`);
+const expireStepStatement=db.prepare(`
+ UPDATE coordination_steps SET
+  status=CASE WHEN attempts>=max_attempts THEN 'failed' ELSE 'ready' END,
+  assigned_agent=NULL,assignment_token=NULL,lease_expires_at=NULL,last_activity_at=@now,
+  review_feedback='Assignment lease expired before submission; prior assignment revoked.',
+  updated_at=@now,started_at=NULL,submitted_at=NULL
+ WHERE id=@id AND status IN ('assigned','in_progress')
+  AND lease_expires_at IS NOT NULL AND lease_expires_at<=@now
 `);
 
 export class CoordinationStore {
@@ -431,9 +498,39 @@ export class CoordinationStore {
       maxAttempts:step.maxAttempts,resultSummary:step.resultSummary||null,
       evidenceJson:JSON.stringify(step.evidence||[]),reviewFeedback:step.reviewFeedback||null,
       updatedAt:step.updatedAt,startedAt:step.startedAt||null,
-      submittedAt:step.submittedAt||null,reviewedAt:step.reviewedAt||null
+      submittedAt:step.submittedAt||null,reviewedAt:step.reviewedAt||null,
+      assignedAt:step.assignedAt||null,leaseExpiresAt:step.leaseExpiresAt||null,
+      lastActivityAt:step.lastActivityAt||null,assignmentToken:step.assignmentToken||null
     });
     return this.getStep(step.id);
+  }
+
+  renewLease({stepId,agentId,assignmentToken,now=new Date().toISOString(),leaseExpiresAt}) {
+    const changed=renewStepLeaseStatement.run({id:stepId,agentId,assignmentToken,now,leaseExpiresAt});
+    return changed.changes?this.getStep(stepId):null;
+  }
+
+  startWithLease({stepId,agentId,assignmentToken,now=new Date().toISOString(),leaseExpiresAt}) {
+    const changed=startStepLeaseStatement.run({id:stepId,agentId,assignmentToken,now,leaseExpiresAt});
+    return changed.changes?this.getStep(stepId):null;
+  }
+
+  submitWithLease({stepId,agentId,assignmentToken,attempt,summary,evidence,reportId,now=new Date().toISOString()}) {
+    return submitStepWithLeaseTransaction({stepId,agentId,assignmentToken,attempt,summary,evidence,reportId,now});
+  }
+
+  recoverExpiredLeases(now=new Date().toISOString()) {
+    const recover=db.transaction(()=>{
+      const expired=findExpiredStepsStatement.all(now);
+      const recovered=[];
+      for(const row of expired){
+        if(expireStepStatement.run({id:row.id,now}).changes){
+          recovered.push({agentId:row.assigned_agent,step:this.getStep(row.id)});
+        }
+      }
+      return recovered;
+    });
+    return recover();
   }
 
   updatePlanStatus(id,status,updatedAt=new Date().toISOString()){

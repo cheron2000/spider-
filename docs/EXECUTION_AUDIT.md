@@ -34,7 +34,7 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 3. Provider-backed agents dispatch through `executeProviderAssignment` and `ProviderRuntimeManager`.
 4. A provider report is persisted and the step enters `review`; downstream dependencies wait for coordinator approval.
 5. External workers retrieve assigned work, start steps, submit evidence, and may provide lateral peer reviews. Peer feedback is advisory; coordinator review is authoritative.
-6. Startup reconciliation resets in-flight coordination steps for recovery. It is not a heartbeat-driven lease and cannot safely detect all stale external workers.
+6. Startup reconciliation revokes all in-flight assignment tokens; during runtime, persisted leases can be renewed only with the current token. Expired work is requeued within the attempt limit or failed when exhausted. Coordinator approval remains required.
 
 ## Findings that remain open
 
@@ -42,9 +42,11 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 
 The dashboard's New Objective UI calls `POST /api/ceo/plan`, which creates GitHub issues. Provider execution uses the separate authenticated `/api/coordinator/plans` and `/api/coordinator/plans/draft` endpoints. The visible dashboard does not yet provide a complete create-plan → provider execution → report review workflow. GitHub issue creation must not be described as automatically launching provider work.
 
-### P1 — No stale-worker assignment lease
+### P1 — Lease expiry does not guarantee task idempotency
 
-An external worker can disappear after assignment or start, leaving a step in `assigned` or `in_progress` until another recovery event or API restart. Heartbeats update agent status but do not expire step leases. A robust fix needs persisted assignment/lease timestamps, a timeout policy, safe reassignment, and rejection of results from revoked attempts. Retries also need defined idempotency rules for work that may already have changed files or external state.
+Coordination steps now persist assignment time, last activity, lease expiry, and a unique assignment token. External workers renew leases through the step heartbeat endpoint; start and report submission are token-fenced, and submission changes the step plus stores its report in one SQLite transaction. Expired leases revoke the token before requeueing eligible attempts; attempts at the configured limit become failed. Provider execution renews its lease while active and submits through the same token-fenced persistence path.
+
+Lease expiry prevents a stale worker from changing Spider's coordination state, but it cannot undo file edits, deployments, or other external side effects the worker already performed. Retries of non-idempotent tasks still require workspace isolation and task-specific recovery or compensation.
 
 ### P1 — Legacy GitHub task state is in memory
 
@@ -70,6 +72,6 @@ Keep provider ID, step ID, attempt, workspace/revision identity, timestamps, exi
 
 ## Audit conclusion
 
-The source now places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. The access-control boundary still has a shared-agent-key limitation: workers are not individually authenticated. The dashboard/DAG split, stale-worker lease handling, in-memory legacy task state, and provider compatibility remain open implementation risks.
+The source now places coordinator-facing data behind coordinator authentication and reduces the public health endpoint to a minimal liveness response. The access-control boundary still has a shared-agent-key limitation: workers are not individually authenticated. The dashboard/DAG split, in-memory legacy task state, shared-agent-key identity limitation, and provider compatibility remain open implementation risks. Lease expiry and stale-submission fencing are implemented at source level but have not been runtime-tested.
 
 This is a source-level audit, not a claim that endpoints or provider integrations passed runtime validation. No tests or builds were run, per the project instruction.

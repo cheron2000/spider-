@@ -59,8 +59,8 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 1. Startup creates or restores the six reserved provider identities in their canonical slots, all marked offline until their adapter health checks pass.
 2. `GET /api/providers` lists status, safe failure reason, last probe time, current task count, and capacity. `GET /api/health` includes the same provider state summary.
 3. An enabled, ready adapter marks its corresponding agent available. Disabled or unready adapters remain offline and are excluded from scheduling.
-4. The coordinator assigns a durable step, places it in the agent's active task list, and dispatches it to the adapter. Execution begins the step and runs with a bounded timeout.
-5. A provider result is stored as a durable report and moved to `review`. Even successful CLI exit does not approve the work or unlock dependencies. Peer feedback remains advisory and coordinator approval is required.
+4. The coordinator assigns a durable step, creates a unique assignment token, persists assignment/expiry/activity timestamps, places the step in the agent's active task list, and dispatches it to the adapter.
+5. While a provider call is active, Spider renews the lease. Results are accepted only if the assignment token remains current and unexpired; the report and transition to `review` are stored atomically. Even successful CLI exit does not approve the work or unlock dependencies. Peer feedback remains advisory and coordinator approval is required.
 6. If an invocation cannot start or times out, the agent work lease is released and the step is returned to `ready` while attempts remain, or marked `failed` when exhausted. The adapter is marked offline until a later health probe makes it available again.
 7. Local CLI adapters are fixed to one concurrent task because each is bound to one writable workspace. Manus and the Replit bridge support bounded remote concurrency (1–3); for Replit, the bridge must provision isolated task workspaces before enabling concurrency above one.
 
@@ -72,6 +72,7 @@ Every request includes `Authorization: Bearer <token>`; Spider keeps the bridge 
 - Peer messaging and coordinator actions stay disabled when their API key is absent, shorter than 32 characters, or a recognized placeholder. Do not deploy with example credentials. GitHub webhooks are rejected until a non-placeholder `GITHUB_WEBHOOK_SECRET` of at least 32 characters is configured.
 - The adapter status `authState: not-probed` means configuration and executable/workspace were found, not that a full authenticated model request has been verified. The first real call is the functional authentication check.
 - The Replit bridge is a separate service that must be built, hosted, and secured for your deployment. Without a valid bridge, the Replit slot remains offline.
+- Lease fencing protects Spider's SQLite coordination state; it does not undo external side effects from a worker whose lease expired. Work that is not safe to repeat needs task-specific idempotency or compensation.
 - No tests or builds were run as part of this change, in keeping with the instruction to skip testing for now.
 
 ## Official command/API references
@@ -93,7 +94,11 @@ The key must be a unique secret of at least 32 characters. Worker registration a
 - `POST /api/agents/register` and `DELETE /api/agents/:id`: coordinator-authenticated provisioning.
 - `POST /api/agents/:id/heartbeat`: agent-authenticated; the path identity must equal `x-agent-id`.
 - `POST /api/tasks/:id/claim`, `/progress`, and `/complete`: agent-authenticated; an agent may only mutate its own claimed task. Provider-backed identities must use the coordinator's dependency-aware execution path.
-- `GET /api/agents/:id/work`, `GET /api/agents/:id/reviews`, peer messaging, and step submissions retain agent authentication.
+- `GET /api/agents/:id/work` returns active step lease expiry and assignment token. Workers must retain the token with that attempt.
+- `POST /api/coordinator/steps/:id/start` and `/submit` require the current `assignmentToken` supplied by the work queue.
+- `POST /api/coordinator/steps/:id/heartbeat` renews the lease for the current token; expired/revoked assignments are rejected.
+- `GET /api/agents/:id/reviews` and peer messaging retain agent authentication.
+- Lease duration is controlled by `SPIDER_ASSIGNMENT_LEASE_MS` (default 120000 ms, clamped to 30000–3600000 ms).
 
 The dashboard's current “New objective” action uses the GitHub issue starter-plan endpoint (`POST /api/ceo/plan`). The durable provider-coordinator DAG API is separate and requires the coordinator key; the dashboard does not yet expose that full workflow. Do not interpret issue creation as automatic provider execution.
 
@@ -111,7 +116,7 @@ Issues addressed in the audit commit:
 Known blockers after source review:
 - Dashboard objective creation and the durable provider DAG are still separate workflows.
 - CORS is not an access-control boundary. Keep the API on a trusted local network or place it behind an authenticated gateway before exposing it to untrusted networks.
-- External-agent coordination steps have no heartbeat-based lease expiry. A worker that disappears after assignment can leave its step assigned/in progress until manual intervention or API restart recovery.
+- Lease expiry requeues or fails stale assignments and token-fences submissions. It does not undo external side effects; non-idempotent work still needs task-specific recovery or compensation.
 - Provider CLI flag/output compatibility and remote provider credentials have not been validated end-to-end. The Manus adapter now checks task detail after a stopped event, but live API execution remains unverified. Replit still requires a separately deployed bridge.
 - GitHub issue task status/progress/completion is held in process memory and is reconstructed from GitHub issue metadata on sync; these runtime updates are not a durable task journal.
 

@@ -38,6 +38,10 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 
 ## Findings that remain open
 
+### Phase 5 hardening — coordinator response redaction and recovery visibility
+
+Coordinator-facing plan serialization now omits per-assignment lease tokens from step objects, including plan lists/details, plan creation/advance responses, report submissions, review queues, and retry/review responses. Agent work retrieval remains token-bearing because workers need the token to prove lease ownership. The dashboard refreshes coordinator state periodically as a fallback to live events, shows per-attempt report summaries/evidence and review outcomes, and exposes a retry dialog requiring a reconciliation note and explicit confirmation before calling the existing guarded retry endpoint. The server continues to enforce failed-state and dependency checks. Source-level review only; tests and builds were not run.
+
 ### P1 — Dashboard and durable provider DAG are separate workflows
 
 The dashboard's primary New Execution Plan flow now calls authenticated `POST /api/coordinator/plans/draft`, lists and inspects durable coordinator plans, visualizes dependency edges and step states, surfaces pending reports, provides approve/reject controls through `POST /api/coordinator/steps/:id/review`, and displays the plan-scoped execution journal. A manual Advance Plan action calls the coordinator scheduler. The legacy GitHub issue cache remains visible as a separate mirror; syncing issues does not launch provider work. This is source-level implementation only and has not been runtime-tested.

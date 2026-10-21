@@ -291,18 +291,15 @@ function refreshCoordinationPlanStatus(planId){
  return coordinationStore.getPlan(planId);
 }
 
+function serializeCoordinationStep(step){
+ if(!step)return step;
+ const {assignmentToken:_assignmentToken,...safeStep}=step;
+ return {...safeStep,assignedAgentName:agents.get(step.assignedAgent)?.name||null,
+  peerReviews:coordinationStore.listPeerReviews(step.id).map(review=>({...review,reviewerName:agents.get(review.reviewerAgent)?.name||review.reviewerAgent}))};
+}
 function serializeCoordinationPlan(plan){
  if(!plan)return plan;
- return {
-  ...plan,
-  steps:plan.steps.map(step=>({
-   ...step,
-   assignedAgentName:agents.get(step.assignedAgent)?.name||null,
-   peerReviews:coordinationStore.listPeerReviews(step.id).map(review=>({
-    ...review,reviewerName:agents.get(review.reviewerAgent)?.name||review.reviewerAgent
-   }))
-  }))
- };
+ return {...plan,steps:plan.steps.map(serializeCoordinationStep)};
 }
 function availableAgentForStep(step){
  const required=(step.requiredCapabilities||[]).map(normalizeCapability);
@@ -527,7 +524,7 @@ app.get('/api/coordinator/reviews',requireCoordinator,(req,res)=>{
   .filter(step=>step.status==='review')
   .map(step=>({
    planId:plan.id,objective:plan.objective,
-   step:{...step,assignedAgentName:agents.get(step.assignedAgent)?.name||null},
+   step:serializeCoordinationStep(step),
    peerReviews:coordinationStore.listPeerReviews(step.id).filter(review=>review.attempt===step.attempts)
     .map(review=>({...review,reviewerName:agents.get(review.reviewerAgent)?.name||review.reviewerAgent}))
   }))
@@ -539,7 +536,7 @@ app.post('/api/coordinator/plans/draft',requireCoordinator,(req,res)=>{
  if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
  const created=createCoordinationPlan(parsed.data.objective,draftCoordinationSteps(parsed.data.objective));
  const scheduling=advanceCoordinationPlan(created.id);
- res.status(201).json({plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+ res.status(201).json({plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned});
 });
 app.post('/api/coordinator/plans',requireCoordinator,(req,res)=>{
  const stepSchema=z.object({
@@ -559,7 +556,7 @@ app.post('/api/coordinator/plans',requireCoordinator,(req,res)=>{
  if(graphError)return res.status(400).json({error:graphError});
  const created=createCoordinationPlan(parsed.data.objective,parsed.data.steps);
  const scheduling=advanceCoordinationPlan(created.id);
- res.status(201).json({plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+ res.status(201).json({plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned});
 });
 app.post('/api/coordinator/plans/:id/advance',requireCoordinator,(req,res)=>{
  const result=advanceCoordinationPlan(req.params.id);
@@ -638,7 +635,7 @@ app.post('/api/coordinator/steps/:id/start',requireMessageAgent,(req,res)=>{
  if(!updated)return res.status(409).json({error:'Assignment lease expired or revoked. Fetch the current work queue before continuing.'});
  refreshCoordinationPlanStatus(step.planId);
  emit('coordination.step.started',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id});
- res.json({step:updated});
+ res.json({step:serializeCoordinationStep(updated)});
 });
 app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  const parsed=z.object({
@@ -667,7 +664,7 @@ app.post('/api/coordinator/steps/:id/submit',requireMessageAgent,(req,res)=>{
  emit('coordination.step.submitted',{planId:step.planId,stepId:step.id,key:step.key,agentId:req.spiderAgent.id,title:step.title});
  const scheduling=advanceCoordinationPlan(step.planId);
  advanceOtherCoordinationPlans(step.planId);
- res.status(202).json({step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,note:'Submission saved for coordinator review; dependencies remain blocked until approval.'});
+ res.status(202).json({step:serializeCoordinationStep(updated),plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned,note:'Submission saved for coordinator review; dependencies remain blocked until approval.'});
 });
 app.post('/api/coordinator/steps/:id/retry',requireCoordinator,(req,res)=>{
  const parsed=z.object({
@@ -694,7 +691,7 @@ app.post('/api/coordinator/steps/:id/retry',requireCoordinator,(req,res)=>{
  const scheduling=advanceCoordinationPlan(step.planId);
  advanceOtherCoordinationPlans(step.planId);
  res.status(202).json({
-  step:updated,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned,
+  step:serializeCoordinationStep(updated),plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned,
   note:'Retry authorized. Confirm that possible side effects from the previous execution were reconciled before accepting the new result.'
  });
 });
@@ -723,7 +720,7 @@ app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
  emit('coordination.step.reviewed',{planId:step.planId,stepId:step.id,key:step.key,decision:parsed.data.decision,agentId:step.assignedAgent,attempt:step.attempts});
  const scheduling=advanceCoordinationPlan(step.planId);
  advanceOtherCoordinationPlans(step.planId);
- res.json({step:reviewedStep,plan:scheduling.plan,assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+ res.json({step:serializeCoordinationStep(reviewedStep),plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned});
 });
 app.get('/api/topology',requireCoordinator,(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));

@@ -40,7 +40,7 @@ function emit(type,payload){
  if(type.startsWith('coordination.')){
   const source=payload&&typeof payload==='object'?payload:{};
   const details={};
-  for(const key of ['key','status','decision','requeued','exhausted','providerSuccess','previousAttempts','reason','reviewFeedback']){
+  for(const key of ['key','status','decision','requeued','exhausted','providerSuccess','previousAttempts','reason','reviewFeedback','provenance']){
    if(source[key]===undefined||source[key]===null)continue;
    details[key]=typeof source[key]==='string'?redactSecrets(source[key]).slice(0,1000):source[key];
   }
@@ -432,8 +432,16 @@ async function executeProviderAssignment(agentId,assignment){
      latest.assignmentToken!==assignment.assignmentToken||!latest.leaseExpiresAt||
      Date.parse(latest.leaseExpiresAt)<=Date.now())return;
   const submittedAt=new Date().toISOString();
+  const provenance={
+   schema:'spider.provider-provenance.v1',
+   providerId:agent.providerId,
+   adapterReportedSuccess:result.success===true,
+   invocation:result.provenance||null,
+   coordinatorObservedAt:submittedAt
+  };
+  const provenanceRecord=redactSecrets(JSON.stringify(provenance)).slice(0,1800);
   const summary=result.success?result.summary:'Provider returned an incomplete, blocked, or unsuccessful result. Coordinator must inspect it before approval.\n\n'+result.summary;
-  const evidence=[...result.evidence,result.success?'provider-result:success':'provider-result:needs-review'];
+  const evidence=[...result.evidence,'provider-provenance-json:'+provenanceRecord,result.success?'provider-result:success':'provider-result:needs-review'];
   const submitted=coordinationStore.submitWithLease({
    stepId:latest.id,agentId,assignmentToken:assignment.assignmentToken,attempt:latest.attempts,
    summary,evidence:evidence.slice(0,30),reportId:crypto.randomUUID(),now:submittedAt
@@ -442,7 +450,8 @@ async function executeProviderAssignment(agentId,assignment){
   releaseProviderWork(agentId,latest.id);
   emit('coordination.step.submitted',{
    planId:latest.planId,stepId:latest.id,key:latest.key,agentId,title:latest.title,
-   providerId:agent.providerId,providerSuccess:result.success
+   providerId:agent.providerId,providerSuccess:result.success,
+   provenance:provenanceRecord
   });
   return submitted;
  }catch(error){

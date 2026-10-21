@@ -233,11 +233,13 @@ export class CommandProviderAdapter {
     const workspace=await inspectWorkspace(this.workspace);
     if(!workspace.ok)throw new Error('Provider workspace is no longer available. '+workspace.reason);
     const prompt=cliPrompt(work);
+    const invocationStartedAt=new Date().toISOString();
     const result=await runProcess(this.command,this.argsFor(prompt),{
       cwd:workspace.path,
       env:this.childEnv(),
       timeoutMs:boundedTimeout(process.env[this.timeoutEnv]),
     });
+    const invocationCompletedAt=new Date().toISOString();
     const body=extractCliText(result.stdout);
     const outcome=inspectCliOutcome(result.stdout);
     if((result.exitCode!==0||outcome.failed)&&AUTH_FAILURE.test(result.stderr+'\n'+result.stdout)){
@@ -250,6 +252,13 @@ export class CommandProviderAdapter {
     if(outcome.failed)evidence.push('provider-cli-status:failure');
     if(result.signal)evidence.push('process-signal:'+result.signal);
     if(result.stderr)evidence.push('stderr-summary:'+result.stderr.slice(-350,500));
-    return {summary:summary.slice(0,5000),evidence,success:result.exitCode===0&&!outcome.failed,providerStatus:'ready'};
+    return {
+      summary:summary.slice(0,5000),evidence,success:result.exitCode===0&&!outcome.failed,providerStatus:'ready',
+      provenance:{
+        invocationStartedAt,invocationCompletedAt,processExitCode:result.exitCode,
+        processSignal:result.signal,resultStatus:outcome.failed?'provider-reported-failure':result.exitCode===0?'zero-exit-reported-success':'nonzero-exit',
+        changedFileRefs:[]
+      }
+    };
   }
 }

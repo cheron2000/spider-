@@ -101,16 +101,30 @@ export class ProviderRuntimeManager {
     if(active>=adapter.maxConcurrentTasks)throw new Error('Provider runtime concurrency limit reached.');
     this.inFlight.set(id,active+1);
     this.onStateChange(this.snapshot(id));
+    const invocationStartedAt=new Date().toISOString();
     try{
       const health=await adapter.health();
       this.onStateChange(this.snapshot(id));
       if(health.status!=='ready')throw new Error(health.reason||'Provider runtime is offline.');
       const result=await adapter.runTask(work);
+      const invocationCompletedAt=new Date().toISOString();
       if(!result||typeof result.summary!=='string'||!result.summary.trim())throw new Error('Provider returned an empty or invalid completion report.');
+      const provenance={
+        invocationStartedAt,invocationCompletedAt,
+        adapterId:id,
+        workspaceCanonicalPath:typeof adapter.healthState?.workspaceCanonicalPath==='string'?adapter.healthState.workspaceCanonicalPath:null,
+        adapterReportedSuccess:result.success!==false,
+        adapterEvidenceCount:Array.isArray(result.evidence)?result.evidence.length:0,
+        processExitCode:Number.isInteger(result.provenance?.processExitCode)?result.provenance.processExitCode:null,
+        processSignal:typeof result.provenance?.processSignal==='string'?result.provenance.processSignal:null,
+        resultStatus:typeof result.provenance?.resultStatus==='string'?result.provenance.resultStatus:null,
+        changedFileRefs:Array.isArray(result.provenance?.changedFileRefs)?result.provenance.changedFileRefs.filter(item=>typeof item==='string').slice(0,20).map(item=>redactSecrets(item).slice(0,300)):[]
+      };
       return {
         summary:redactSecrets(result.summary).slice(0,5000),
-        evidence:Array.isArray(result.evidence)?result.evidence.filter(item=>typeof item==='string').slice(0,30).map(item=>redactSecrets(item).slice(0,500)):[],
-        success:result.success!==false
+        evidence:Array.isArray(result.evidence)?result.evidence.filter(item=>typeof item==='string').slice(0,29).map(item=>redactSecrets(item).slice(0,500)):[],
+        success:result.success!==false,
+        provenance
       };
     }catch(error){
       // Failure to invoke a configured runtime takes it offline until the next health probe.

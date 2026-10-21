@@ -452,9 +452,11 @@ async function executeProviderAssignment(agentId,assignment){
      Date.parse(latest.leaseExpiresAt)>Date.now()){
    const now=new Date().toISOString();
    const exhausted=latest.attempts>=latest.maxAttempts;
-   const feedback='Provider runtime failed; work was not accepted. '+redactSecrets(error?.message||'Unknown adapter failure').slice(0,500);
+   // Dispatch begins only after the step is marked in_progress. An adapter exception
+   // cannot prove that no external side effects occurred, so never auto-requeue here.
+   const feedback='Provider runtime failed after execution started; automatic retry blocked until coordinator reconciles possible external side effects. '+redactSecrets(error?.message||'Unknown adapter failure').slice(0,400);
    coordinationStore.updateStep({
-    ...latest,status:exhausted?'failed':'ready',assignedAgent:null,assignmentToken:null,leaseExpiresAt:null,
+    ...latest,status:'failed',assignedAgent:null,assignmentToken:null,leaseExpiresAt:null,
     lastActivityAt:now,reviewFeedback:feedback,startedAt:null,submittedAt:null,updatedAt:now
    });
    releaseProviderWork(agentId,latest.id);

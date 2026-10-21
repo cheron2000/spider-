@@ -449,6 +449,10 @@ const reviewReportStatement=db.prepare(`
  UPDATE coordination_step_reports SET review_decision=@decision,review_feedback=@feedback,reviewed_at=@reviewedAt
  WHERE step_id=@stepId AND attempt=@attempt AND review_decision IS NULL
 `);
+const listRecoverableStepsStatement=db.prepare(`
+ SELECT id,assigned_agent FROM coordination_steps
+ WHERE status IN ('assigned','in_progress') ORDER BY created_at,id
+`);
 const recoverStepsStatement=db.prepare(`
  UPDATE coordination_steps SET
   status=CASE WHEN status='in_progress' OR attempts >= max_attempts THEN 'failed' ELSE 'ready' END,
@@ -643,7 +647,15 @@ export class CoordinationStore {
   }
 
   recoverInFlightSteps(now=new Date().toISOString()){
-    return recoverStepsStatement.run({now}).changes;
+    const recover=db.transaction(()=>{
+      const rows=listRecoverableStepsStatement.all();
+      recoverStepsStatement.run({now});
+      return rows.map(row=>({
+        previousAgentId:row.assigned_agent,
+        step:this.getStep(row.id)
+      }));
+    });
+    return recover();
   }
 }
 

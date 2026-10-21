@@ -34,7 +34,7 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 3. Provider-backed agents dispatch through `executeProviderAssignment` and `ProviderRuntimeManager`.
 4. A provider report is persisted and the step enters `review`; downstream dependencies wait for coordinator approval.
 5. External workers retrieve assigned work, start steps, submit evidence, and may provide lateral peer reviews. Peer feedback is advisory; coordinator review is authoritative.
-6. Startup reconciliation revokes all in-flight assignment tokens; during runtime, persisted leases can be renewed only with the current token. Expired work is requeued within the attempt limit or failed when exhausted. Coordinator approval remains required.
+6. Startup reconciliation revokes all in-flight assignment tokens; during runtime, persisted leases can be renewed only with the current token. Startup now writes one journal event per recovered step, retaining the previous agent/provider identity, attempt, resulting state, and reconciliation reason, plus an aggregate recovery count. Expired work is requeued within the attempt limit or failed when exhausted. Coordinator approval remains required.
 
 ## Findings that remain open
 

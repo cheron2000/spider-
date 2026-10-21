@@ -486,7 +486,16 @@ async function executeProviderAssignment(agentId,assignment){
 }
 
 const recoveredCoordinationSteps=coordinationStore.recoverInFlightSteps();
-if(recoveredCoordinationSteps)emit('coordination.recovered',{stepCount:recoveredCoordinationSteps});
+for(const recovered of recoveredCoordinationSteps){
+ const step=recovered.step;
+ emit('coordination.step.recovered',{
+  planId:step.planId,stepId:step.id,key:step.key,status:step.status,attempt:step.attempts,
+  previousAgentId:recovered.previousAgentId,
+  providerId:agents.get(recovered.previousAgentId)?.providerId||null,
+  reason:step.reviewFeedback
+ });
+}
+if(recoveredCoordinationSteps.length)emit('coordination.recovered',{stepCount:recoveredCoordinationSteps.length});
 for(const savedPlan of coordinationStore.listPlans(1000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)))advanceCoordinationPlan(savedPlan.id);
 
 app.get('/api/coordinator/plans',requireCoordinator,(req,res)=>{

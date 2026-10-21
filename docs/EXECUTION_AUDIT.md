@@ -40,7 +40,7 @@ CORS is not an authorization boundary. Coordinator authentication depends on kee
 
 ### P1 — Dashboard and durable provider DAG are separate workflows
 
-The dashboard's New Objective UI calls `POST /api/ceo/plan`, which creates GitHub issues. Provider execution uses the separate authenticated `/api/coordinator/plans` and `/api/coordinator/plans/draft` endpoints. The visible dashboard does not yet provide a complete create-plan → provider execution → report review workflow. GitHub issue creation must not be described as automatically launching provider work.
+The dashboard's primary New Execution Plan flow now calls authenticated `POST /api/coordinator/plans/draft`, lists and inspects durable coordinator plans, visualizes dependency edges and step states, surfaces pending reports, provides approve/reject controls through `POST /api/coordinator/steps/:id/review`, and displays the plan-scoped execution journal. A manual Advance Plan action calls the coordinator scheduler. The legacy GitHub issue cache remains visible as a separate mirror; syncing issues does not launch provider work. This is source-level implementation only and has not been runtime-tested.
 
 ### P1 — Lease expiry cannot cancel external side effects
 

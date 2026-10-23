@@ -281,15 +281,18 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
   assert.equal(root.status, 'done');
   assert.equal(child.status, 'assigned');
 
-  const childWorkResponse = await request(`/api/agents/${WORKER_ID}/work`, { agentId: WORKER_ID, agentKey: workerKey });
+  const childAgentId = child.assignedAgent;
+  const childAgentKey = workerCredentials.get(childAgentId);
+  assert.ok(childAgentKey, 'assigned worker must have a registered credential');
+  const childWorkResponse = await request(`/api/agents/${childAgentId}/work`, { agentId: childAgentId, agentKey: childAgentKey });
   const childWork = (await responseJson(childWorkResponse)).work.find(step => step.key === 'child');
   assert.ok(childWork?.assignmentToken);
   assert.equal((await request(`/api/coordinator/steps/${child.id}/start`, {
-    method: 'POST', agentId: WORKER_ID, agentKey: workerKey,
+    method: 'POST', agentId: childAgentId, agentKey: childAgentKey,
     body: { assignmentToken: childWork.assignmentToken },
   })).status, 200);
   assert.equal((await request(`/api/coordinator/steps/${child.id}/submit`, {
-    method: 'POST', agentId: WORKER_ID, agentKey: workerKey,
+    method: 'POST', agentId: childAgentId, agentKey: childAgentKey,
     body: { assignmentToken: childWork.assignmentToken, summary: 'Child report', evidence: ['test:evidence-child'] },
   })).status, 202);
 

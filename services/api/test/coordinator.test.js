@@ -156,6 +156,59 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
   assert.ok(registered.credential?.value, 'registration should issue the credential once');
   const workerKey = registered.credential.value;
 
+  // Exercise peer-message authorization and durable inbox delivery with a full peer ring.
+  const workerCredentials = new Map([[WORKER_ID, workerKey]]);
+  for (let index = 2; index <= 5; index++) {
+    const id = `integration-worker-${index}`;
+    const response = await request('/api/agents/register', {
+      method: 'POST',
+      body: { id, name: `Integration Worker ${index}`, runtime: 'local', capabilities: ['testing'], maxConcurrentTasks: 1 },
+    });
+    assert.equal(response.status, 201);
+    workerCredentials.set(id, (await responseJson(response)).credential.value);
+  }
+  const topology = await responseJson(await request('/api/topology'));
+  const peerId = topology.peerMap[WORKER_ID]?.[0];
+  assert.ok(peerId, 'registered workers should have at least one lateral peer');
+  const messagePayload = {
+    taskId: 'general', traceId: 'phase-b-peer-trace', fromAgent: WORKER_ID,
+    toAgent: peerId, kind: 'question', summary: 'Confirm peer message delivery.', artifactRefs: [],
+  };
+  assert.equal((await request('/api/messages', {
+    method: 'POST', agentId: WORKER_ID, agentKey: workerKey,
+    body: { ...messagePayload, fromAgent: peerId },
+  })).status, 403, 'sender identity must match authenticated worker');
+  assert.equal((await request('/api/messages', {
+    method: 'POST', agentId: WORKER_ID, agentKey: workerKey,
+    body: { ...messagePayload, toAgent: WORKER_ID },
+  })).status, 400, 'self-messaging must be rejected');
+  const messageResponse = await request('/api/messages', {
+    method: 'POST', agentId: WORKER_ID, agentKey: workerKey, body: messagePayload,
+  });
+  assert.equal(messageResponse.status, 201);
+  const message = (await responseJson(messageResponse)).message;
+  assert.equal(message.status, 'queued');
+  assert.equal((await request(`/api/agents/${peerId}/messages`, {
+    agentId: WORKER_ID, agentKey: workerKey,
+  })).status, 403, 'workers may only read their own inbox');
+  const inboxResponse = await request(`/api/agents/${peerId}/messages`, {
+    agentId: peerId, agentKey: workerCredentials.get(peerId),
+  });
+  assert.equal(inboxResponse.status, 200);
+  const inbox = (await responseJson(inboxResponse)).messages;
+  assert.ok(inbox.some(item => item.id === message.id && item.status === 'delivered'));
+  assert.equal((await request(`/api/messages/${message.id}/ack`, {
+    method: 'POST', agentId: WORKER_ID, agentKey: workerKey, body: {},
+  })).status, 403, 'only the recipient may acknowledge a message');
+  const ackResponse = await request(`/api/messages/${message.id}/ack`, {
+    method: 'POST', agentId: peerId, agentKey: workerCredentials.get(peerId), body: {},
+  });
+  assert.equal(ackResponse.status, 200);
+  assert.equal((await responseJson(ackResponse)).message.status, 'acknowledged');
+  assert.equal((await request('/api/webhooks/github', {
+    method: 'POST', body: { action: 'opened' },
+  })).status, 503, 'webhook endpoint must stay disabled when no secret is configured');
+
   // Create a two-step DAG. Only the root should become assigned; child stays blocked.
   const createdResponse = await request('/api/coordinator/plans', {
     method: 'POST',

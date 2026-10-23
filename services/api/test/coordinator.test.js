@@ -324,11 +324,14 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
     method: 'POST', body: { reason: 'This step is not failed anymore.' },
   })).status, 409);
 
-  const retryWorkResponse = await request(`/api/agents/${WORKER_ID}/work`, { agentId: WORKER_ID, agentKey: workerKey });
+  const retryAgentId = child.assignedAgent;
+  const retryAgentKey = workerCredentials.get(retryAgentId);
+  assert.ok(retryAgentKey, 'retried step must have a registered worker credential');
+  const retryWorkResponse = await request(`/api/agents/${retryAgentId}/work`, { agentId: retryAgentId, agentKey: retryAgentKey });
   const retryWork = (await responseJson(retryWorkResponse)).work.find(step => step.key === 'child');
   assert.ok(retryWork?.assignmentToken);
   assert.equal((await request(`/api/coordinator/steps/${child.id}/start`, {
-    method: 'POST', agentId: WORKER_ID, agentKey: workerKey,
+    method: 'POST', agentId: retryAgentId, agentKey: retryAgentKey,
     body: { assignmentToken: retryWork.assignmentToken },
   })).status, 200);
 

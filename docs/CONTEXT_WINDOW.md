@@ -14,7 +14,7 @@ Spider is a multi-agent orchestration framework. A central coordinator turns an 
 
 Six canonical provider slots are reserved: Antigravity, Codex, Copilot, Kiro, Manus, and Replit. The system contains a Node.js/Express API, SQLite persistence, provider adapters/runtime management, worker APIs and peer messaging, Socket.IO events, and a React/Vite dashboard.
 
-**Important maturity caveat:** Code and docs are present for the workflows described below, but they are not proof of successful runtime behavior. The checked-in execution audit explicitly says tests/builds were not run as part of that audit. No application build, test suite, live provider call, or deployment test was run in this review.
+**Important maturity caveat:** A first automated validation baseline now passes in GitHub Actions on Node 20, including the API integration test and dashboard build. This validates selected coordinator/worker and provider-utility paths only; live provider execution, deployment security, and production readiness remain unverified.
 
 ## 2. Repository map
 
@@ -212,14 +212,15 @@ Root scripts:
 
 **Validation baseline added in draft PR #4:** `services/api/test/coordinator.test.js` covers coordinator auth, graph-cycle rejection, worker credentials/identity, lease-token fencing, atomic report submission, dependency approval gating, retry guards, journal events, and in-progress restart recovery. `services/api/test/provider-base.test.js` covers secret redaction, structured CLI output parsing, provider-reported failure detection, transient reconnect handling, and child environment allowlisting.
 
-GitHub Actions run [39987558952](https://github.com/cheron2000/spider-/actions/runs/39987558952) completed successfully: 6 tests passed, 0 failed, and the dashboard build passed. This proves the new test suite and dashboard build passed on GitHub's Node 20 runner; it does not prove live provider execution, deployment security, or full production readiness.
+GitHub Actions runs [39988891643](https://github.com/cheron2000/spider-/actions/runs/39988891643) and [39988898417](https://github.com/cheron2000/spider-/actions/runs/39988898417) completed successfully on commit `db8cfd99dba5ef1e32f5427b6cdd6d7aa3c63a82`: 8 tests passed, 0 failed, and the dashboard build passed. The integration test now registers multiple workers and follows the scheduler-selected worker for dependent/retried steps rather than assuming the first worker always receives them. New assertions cover peer-message identity spoofing, self-send rejection, recipient-only inbox access and acknowledgement, and fail-closed webhook behavior when the secret is not configured. Provider tests additionally cover timeout clamping and nested provider failure records. This does not prove live provider execution, webhook signature correctness, deployment security, or production readiness.
 
 ## 10. Findings and priorities
 
 ### P0 — Establish reproducible validation (baseline implemented; expand coverage)
 - Completed in draft PR #4: Node's built-in test runner, isolated SQLite/API integration test, provider utility tests, and CI job that runs tests plus dashboard build.
 - Verified in GitHub Actions run 39987558952: 6 tests passed, 0 failed; dashboard build passed.
-- Remaining: expand coverage for peer messaging/peer-review authorization, lease expiration before start, malformed provider responses, adapter timeout/termination, workspace collision behavior, and GitHub webhook signature validation.
+- Phase B coverage added: peer messaging authorization/delivery/acknowledgement, worker assignment selection under multiple registered workers, timeout-bound validation, nested provider failure parsing, and webhook fail-closed behavior with no secret.
+- Remaining: peer-review authorization matrix, expired-lease sweeper edges, malformed live adapter responses, actual process timeout/termination behavior, workspace collision behavior, and positive/negative GitHub webhook signature validation.
 - Do not claim live provider execution or end-to-end deployment readiness from this CI result.
 
 ### P1 — Complete durability and simplify dual task systems
@@ -247,11 +248,11 @@ GitHub Actions run [39987558952](https://github.com/cheron2000/spider-/actions/r
 
 ## 11. Suggested next implementation sequence
 
-1. **Review and merge validation PR #4** after inspecting the diff; its first CI run is green.
-2. **Extend validation coverage** for peer review/messaging, lease sweeps, provider timeout and workspace collision paths.
+1. **Review draft PR #4** with its expanded Phase B assertions and green CI before merging; do not merge without review.
+2. **Continue reliability coverage** for peer-review authorization, lease sweeps, real process timeout/termination and workspace collision behavior.
 3. **Durable task model:** decide whether GitHub issues are inputs/mirrors for DAG steps or a retired parallel task path.
-3. **Provider integration tests:** one provider at a time, fake adapters first then authenticated smoke tests in isolated workspaces.
-4. **Recovery correctness:** cover every lease/restart/late-report/adapter-exception edge case with tests.
+4. **Provider integration tests:** one provider at a time, fake adapters first then authenticated smoke tests in isolated workspaces.
+5. **Recovery correctness:** cover every lease/restart/late-report/adapter-exception edge case with tests.
 5. **Security hardening:** isolate local CLIs at OS/container level; add deployment gateway/rate limits and improve secret/session handling.
 6. **Artifact provenance:** attach verifiable git diff/commit/tree/artifact references after successful execution, without auto-approving any provider result.
 
@@ -282,4 +283,4 @@ Never place real secrets in source or prompts, and never assume that a provider 
 
 ## Continuation instruction for the next session
 
-Use `cheron2000/spider-` as the source of truth. Review draft PR #4 (`codex/api-test-baseline`) and its green CI run, then merge when the diff is acceptable. The P0 validation baseline is now present on that branch. Next, extend security/recovery coverage and proceed to the durable GitHub task-model decision. Do not modify provider execution/retry semantics without regression tests for leases, stale assignment tokens and potentially non-idempotent external side effects. Keep coordinator approval as the final gate. Do not claim production readiness or provider end-to-end compatibility without reproducible evidence.
+Use `cheron2000/spider-` as the source of truth. Draft PR #4 (`codex/api-test-baseline`) now contains the baseline plus Phase B reliability assertions; commit `db8cfd9` passed 8 tests and the dashboard build in GitHub Actions. Review the full diff before any merge. Next, extend peer-review, lease-expiry, process-termination and workspace-collision coverage, then proceed to the durable GitHub task-model decision. Do not modify provider execution/retry semantics without regression tests for leases, stale assignment tokens and potentially non-idempotent external side effects. Keep coordinator approval as the final gate. Do not claim production readiness or provider end-to-end compatibility without reproducible evidence.

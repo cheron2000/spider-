@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  boundedTimeout,
   extractCliText,
   inspectCliOutcome,
   redactSecrets,
@@ -61,4 +62,20 @@ test('safeChildEnv only passes baseline variables plus explicitly allowlisted va
     if (previousSecret === undefined) delete process.env[secretKey];
     else process.env[secretKey] = previousSecret;
   }
+});
+
+test('boundedTimeout clamps invalid and extreme provider timeout values', () => {
+  assert.equal(boundedTimeout('bad-value', 12345), 12345);
+  assert.equal(boundedTimeout('1'), 10000);
+  assert.equal(boundedTimeout('9999999'), 900000);
+  assert.equal(boundedTimeout('45000'), 45000);
+});
+
+test('inspectCliOutcome recognizes nested failed run records', () => {
+  const result = inspectCliOutcome(JSON.stringify({
+    type: 'workflow.result',
+    data: { run: { status: 'failed', reason: 'Provider returned an invalid response.' } },
+  }));
+  assert.equal(result.failed, true);
+  assert.match(result.reason, /invalid response/i);
 });

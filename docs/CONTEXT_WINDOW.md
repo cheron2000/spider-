@@ -5,7 +5,8 @@
 **Branch:** `main`  
 **Tree SHA inspected:** `a3c0ac45da8e83c5981d1b9afdf3009a0fcb64fa`  
 **Latest commit inspected:** `a3c0ac4` — Capture structured provider execution provenance (2026-10-21)  
-**Purpose:** Carry-forward context for continued implementation and review.
+**Purpose:** Carry-forward context for continued implementation and review.  
+**Validation PR:** https://github.com/cheron2000/spider-/pull/4 (`codex/api-test-baseline`, draft PR).
 
 ## 1. Executive summary
 
@@ -19,7 +20,7 @@ Six canonical provider slots are reserved: Antigravity, Codex, Copilot, Kiro, Ma
 
 - `README.md`: capabilities, quick start, security/maturity warnings.
 - `.env.example`: runtime configuration and secrets template.
-- `.github/workflows/ci.yml`: Node 20 job that runs `npm install` and `npm run build`; the build script builds the dashboard only.
+- `.github/workflows/ci.yml`: Node 20 CI runs `npm install`, `npm test`, and `npm run build`; the dashboard build is separate from the API tests.
 - `package.json`: ESM Node package, scripts, API dependencies, dashboard workspace.
 - `services/api/src/index.js` (~969 lines): API server, authorization, GitHub issue mirror, coordinator, provider dispatch, peer messaging, socket events, lease sweeper, startup recovery.
 - `services/api/src/agentRegistry.js` (~662 lines): SQLite schema/migrations and stores for agents, credentials, messages, coordination plans/steps/reports/reviews, execution journal, leases and recovery.
@@ -204,22 +205,22 @@ Root scripts:
 - `npm run dev`: concurrently launches API and dashboard.
 - `npm run dev:api`: `node --watch services/api/src/index.js`.
 - `npm run dev:web`: dashboard Vite development server.
+- `npm test`: built-in Node test runner for API integration and provider utility tests.
 - `npm run build`: dashboard build only.
 - `npm start`: API start.
 - Node.js 20+ is specified.
 
-GitHub Actions CI currently checks only installation + dashboard build on push/PR. It does not run an API test suite or explicit integration/security tests.
+**Validation baseline added in draft PR #4:** `services/api/test/coordinator.test.js` covers coordinator auth, graph-cycle rejection, worker credentials/identity, lease-token fencing, atomic report submission, dependency approval gating, retry guards, journal events, and in-progress restart recovery. `services/api/test/provider-base.test.js` covers secret redaction, structured CLI output parsing, provider-reported failure detection, transient reconnect handling, and child environment allowlisting.
 
-No tests/builds were run for this review. The source-level execution audit dated 2026-10-20 explicitly states the same. The most useful next action is to create a proper automated test suite and run CI; avoid stating test counts or claiming end-to-end providers work unless newly measured.
+GitHub Actions run [39987558952](https://github.com/cheron2000/spider-/actions/runs/39987558952) completed successfully: 6 tests passed, 0 failed, and the dashboard build passed. This proves the new test suite and dashboard build passed on GitHub's Node 20 runner; it does not prove live provider execution, deployment security, or full production readiness.
 
 ## 10. Findings and priorities
 
-### P0 — Establish reproducible validation (recommended first)
-- Run npm install/build and establish API startup checks.
-- Add node:test or another test framework around coordinator graph validation, lease fencing, recovery/retry, authorization, report atomicity, output redaction, workspace collisions and result parsing.
-- CI should test API as well as dashboard; isolate temporary SQLite files per test.
-- Add HTTP-level tests for coordinator/worker endpoints and fake provider adapter integration tests.
-- Run the complete suite and report actual command outputs.
+### P0 — Establish reproducible validation (baseline implemented; expand coverage)
+- Completed in draft PR #4: Node's built-in test runner, isolated SQLite/API integration test, provider utility tests, and CI job that runs tests plus dashboard build.
+- Verified in GitHub Actions run 39987558952: 6 tests passed, 0 failed; dashboard build passed.
+- Remaining: expand coverage for peer messaging/peer-review authorization, lease expiration before start, malformed provider responses, adapter timeout/termination, workspace collision behavior, and GitHub webhook signature validation.
+- Do not claim live provider execution or end-to-end deployment readiness from this CI result.
 
 ### P1 — Complete durability and simplify dual task systems
 - Either persist the legacy GitHub task cache's progress/ownership/completion in SQLite or explicitly retire that path in favor of the durable DAG.
@@ -246,8 +247,9 @@ No tests/builds were run for this review. The source-level execution audit dated
 
 ## 11. Suggested next implementation sequence
 
-1. **Validation baseline:** API boots cleanly; add automated unit/HTTP tests and broaden CI.
-2. **Durable task model:** decide whether GitHub issues are inputs/mirrors for DAG steps or a retired parallel task path.
+1. **Review and merge validation PR #4** after inspecting the diff; its first CI run is green.
+2. **Extend validation coverage** for peer review/messaging, lease sweeps, provider timeout and workspace collision paths.
+3. **Durable task model:** decide whether GitHub issues are inputs/mirrors for DAG steps or a retired parallel task path.
 3. **Provider integration tests:** one provider at a time, fake adapters first then authenticated smoke tests in isolated workspaces.
 4. **Recovery correctness:** cover every lease/restart/late-report/adapter-exception edge case with tests.
 5. **Security hardening:** isolate local CLIs at OS/container level; add deployment gateway/rate limits and improve secret/session handling.
@@ -280,4 +282,4 @@ Never place real secrets in source or prompts, and never assume that a provider 
 
 ## Continuation instruction for the next session
 
-Use `cheron2000/spider-`, branch `main`, as the source of truth. Begin by checking whether main has advanced beyond the recorded tree SHA, then implement **validation baseline and API tests** before broadening features. Do not modify provider execution/retry semantics without regression tests for leases, stale assignment tokens and potentially non-idempotent external side effects. Keep coordinator approval as the final gate. Do not claim production readiness or provider end-to-end compatibility without reproducible evidence.
+Use `cheron2000/spider-` as the source of truth. Review draft PR #4 (`codex/api-test-baseline`) and its green CI run, then merge when the diff is acceptable. The P0 validation baseline is now present on that branch. Next, extend security/recovery coverage and proceed to the durable GitHub task-model decision. Do not modify provider execution/retry semantics without regression tests for leases, stale assignment tokens and potentially non-idempotent external side effects. Keep coordinator approval as the final gate. Do not claim production readiness or provider end-to-end compatibility without reproducible evidence.

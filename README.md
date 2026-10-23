@@ -29,7 +29,7 @@ Run the automated API and provider utility tests with:
 npm test
 ```
 
-The API integration test uses a temporary SQLite database and keeps provider adapters disabled, so it does not require live provider credentials. The suite exercises coordinator authorization, DAG validation and dependency gating, worker credential checks, assignment-token fencing, coordinator review, guarded retries, execution journaling, restart recovery, provider output parsing, secret redaction, and child-process environment allowlisting. GitHub Actions runs these tests and builds the dashboard on pushes and pull requests.
+The API integration test uses a temporary SQLite database and keeps provider adapters disabled, so it does not require live provider credentials. Its assertions cover coordinator authorization, DAG validation/dependency gating, worker identity and credentials, token fencing, coordinator review/retry, journal and restart recovery, peer-message spoof/self-send rejection, recipient-only inbox access and acknowledgement, plus webhook fail-closed behavior without a configured secret. Provider tests cover output parsing, nested failure detection, timeout bounds, secret redaction, transient reconnect notices, and child-process environment allowlisting. The current suite has 8 Node test cases; GitHub Actions runs them and builds the dashboard on pushes and pull requests.
 
 ## Security and maturity
 

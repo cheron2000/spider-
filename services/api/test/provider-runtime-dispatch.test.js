@@ -57,7 +57,7 @@ test('runtime rejects a concurrent dispatch beyond provider capacity and release
     runtime.dispatch(adapter.id, { prompt: 'second task' }),
     /concurrency limit reached/i,
   );
-  assert.equal(adapter.runTaskCalls, 0, 'second dispatch must not reach the provider');
+  assert.equal(adapter.runTaskCalls, 1, 'only the first dispatch may reach the provider');
   assert.equal(runtime.activeCount(adapter.id), 1);
 
   gate.resolve({ summary: 'first completed', evidence: [], success: true });

@@ -202,13 +202,15 @@ export default function App(){
     }catch(err){setNotice(err.message);}finally{setBusy(false);}
   }
 
-  async function configureProvider(id,enabled,apiKey,workspace){
+  async function configureProvider(id,enabled,apiKey,workspace,bridgeUrl,bridgeToken){
     setBusy(true);
     try{
       const body={};
       if(enabled!==undefined)body.enabled=enabled;
       if(apiKey)body.apiKey=apiKey;
       if(workspace)body.workspace=workspace;
+      if(bridgeUrl)body.bridgeUrl=bridgeUrl;
+      if(bridgeToken)body.bridgeToken=bridgeToken;
       await dataOf(await apiFetch('/api/coordinator/providers/'+encodeURIComponent(id)+'/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));
       setNotice('Provider '+id+' configured.');
       await refresh();
@@ -738,11 +740,16 @@ export default function App(){
                       {p.reason&&<small style={{color:'#f87171',fontSize:10}}>{p.reason}</small>}
                       {p.id==='manus'?(
                         <input className="provider-input" type="password" placeholder="Paste MANUS_API_KEY (sk-...)" value={currentInput.apiKey||''} onChange={e=>setProviderInputs(old=>({...old,[p.id]:{...old[p.id],apiKey:e.target.value}}))}/>
+                      ):p.id==='replit'?(
+                        <>
+                          <input className="provider-input" type="text" placeholder="Bridge URL (e.g. http://localhost:4000/api/replit-bridge)" value={currentInput.bridgeUrl!==undefined?currentInput.bridgeUrl:''} onChange={e=>setProviderInputs(old=>({...old,[p.id]:{...old[p.id],bridgeUrl:e.target.value}}))}/>
+                          <input className="provider-input" type="password" placeholder="Bridge Token (e.g. spider-replit-bridge-token-2026)" value={currentInput.bridgeToken!==undefined?currentInput.bridgeToken:''} onChange={e=>setProviderInputs(old=>({...old,[p.id]:{...old[p.id],bridgeToken:e.target.value}}))}/>
+                        </>
                       ):(
                         <input className="provider-input" type="text" placeholder="Workspace path" value={currentInput.workspace!==undefined?currentInput.workspace:p.workspaceConfigured?p.workspaceCanonicalPath||'':''} onChange={e=>setProviderInputs(old=>({...old,[p.id]:{...old[p.id],workspace:e.target.value}}))}/>
                       )}
-                      {(currentInput.apiKey||currentInput.workspace)&&(
-                        <button className="primary" style={{padding:'4px 8px',fontSize:11}} disabled={busy} onClick={()=>void configureProvider(p.id,p.enabled,currentInput.apiKey,currentInput.workspace)}>
+                      {(currentInput.apiKey||currentInput.workspace||currentInput.bridgeUrl||currentInput.bridgeToken)&&(
+                        <button className="primary" style={{padding:'4px 8px',fontSize:11}} disabled={busy} onClick={()=>void configureProvider(p.id,p.enabled,currentInput.apiKey,currentInput.workspace,currentInput.bridgeUrl,currentInput.bridgeToken)}>
                           Save Settings
                         </button>
                       )}

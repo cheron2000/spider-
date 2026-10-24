@@ -749,6 +749,11 @@ const insertOrUpdateGitHubIssueStatement = db.prepare(`
 
 const findGitHubIssueByIdStatement = db.prepare('SELECT * FROM github_issues WHERE id = ?');
 const findGitHubIssueByNumberStatement = db.prepare('SELECT * FROM github_issues WHERE number = ?');
+const claimGitHubIssueStatement = db.prepare(`
+  UPDATE github_issues
+  SET status='in_progress', assignee_agent=@assigneeAgent, claimed_at=@claimedAt
+  WHERE id=@id AND state!='closed' AND status NOT IN ('done','review','in_progress')
+`);
 const listGitHubIssuesStatement = db.prepare('SELECT * FROM github_issues ORDER BY number ASC');
 const countGitHubIssuesStatement = db.prepare('SELECT COUNT(*) AS count FROM github_issues');
 
@@ -772,6 +777,17 @@ export class GitHubIssueStore {
       syncedAt
     });
     return this.get(task.id || `issue-${task.number}`);
+  }
+
+  claim(idOrNumber, assigneeAgent, claimedAt = new Date().toISOString()) {
+    const task = this.get(idOrNumber);
+    if (!task) return null;
+    const result = claimGitHubIssueStatement.run({
+      id: task.id,
+      assigneeAgent,
+      claimedAt
+    });
+    return result.changes ? this.get(task.id) : null;
   }
 
   syncAll(tasks, syncedAt = new Date().toISOString()) {

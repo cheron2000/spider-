@@ -21,6 +21,16 @@ Spider coordinates six named agent slots (Antigravity, Codex, Copilot, Kiro, Man
 
 The API starts with provider adapters offline. See [Provider adapters and runtime lifecycle](docs/PROVIDER_ADAPTERS.md) to enable individual integrations, configure isolated workspaces, inspect `GET /api/providers`, and understand the Replit bridge contract. The current source-level execution audit and remaining blockers are documented in [Execution audit](docs/EXECUTION_AUDIT.md).
 
+## Tests and validation
+
+Run the automated API and provider utility tests with:
+
+```bash
+npm test
+```
+
+The API integration test uses a temporary SQLite database and keeps provider adapters disabled, so it does not require live provider credentials. Its assertions cover coordinator authorization, DAG validation/dependency gating, worker identity and credentials, token fencing, coordinator review/retry, journal and restart recovery, peer-message spoof/self-send rejection, recipient-only inbox access and acknowledgement, plus webhook fail-closed behavior without a configured secret. Provider tests cover output parsing, nested failure detection, timeout bounds, secret redaction, transient reconnect notices, and child-process environment allowlisting. The current suite has 8 Node test cases; GitHub Actions runs them and builds the dashboard on pushes and pull requests.
+
 ## Security and maturity
 
 Provider CLI processes run on the same host/container as the Spider API, and may modify files in their configured workspace. Use a dedicated workspace per provider, keep each provider's native tool permissions restrictive, and isolate the API and worker processes at the OS/container level before multi-tenant use. The adapters do not commit, push, merge, deploy, or release work. A successful execution is submitted for review; it does not approve the result.

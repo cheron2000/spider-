@@ -10,6 +10,7 @@
     "dev": "concurrently -k -n api,web \"npm run dev:api\" \"npm run dev:web\"",
     "dev:api": "node --watch services/api/src/index.js",
     "dev:web": "npm --workspace apps/dashboard run dev",
+    "test": "node --test",
     "build": "npm --workspace apps/dashboard run build",
     "start": "node services/api/src/index.js"
   },

@@ -643,6 +643,68 @@ app.get('/api/coordinator/reviews',requireCoordinator,(req,res)=>{
  ).slice(0,limit);
  res.json({reviews});
 });
+app.get('/api/coordinator/artifacts',requireCoordinator,async(_q,res)=>{
+  const roots=[
+    path.resolve('workspaces'),
+    path.resolve('../workspaces'),
+    path.resolve(process.env.SPIDER_COPILOT_WORKSPACE||''),
+    path.resolve(process.env.SPIDER_REPLIT_WORKSPACE||''),
+    path.resolve('.')
+  ].filter(Boolean);
+  const seen=new Set();
+  const artifacts=[];
+  for(const root of roots){
+    if(!fs.existsSync(root))continue;
+    const walk=async(currentDir,rel='')=>{
+      let entries=[];
+      try{entries=await fs.promises.readdir(currentDir,{withFileTypes:true});}catch{return;}
+      for(const entry of entries){
+        if(entry.name.startsWith('.')||['node_modules','dist','build','.git','tools'].includes(entry.name))continue;
+        const entryPath=path.join(currentDir,entry.name);
+        const relPath=path.join(rel,entry.name).replace(/\\/g,'/');
+        if(entry.isDirectory()){
+          if(rel.split('/').length<3)await walk(entryPath,relPath);
+        }else{
+          if(seen.has(entryPath))continue;
+          seen.add(entryPath);
+          const ext=path.extname(entry.name).toLowerCase();
+          const isRelevant=['.py','.json','.md','.txt','.js','.jsx','.html','.css'].includes(ext);
+          if(!isRelevant)continue;
+          try{
+            const stats=await fs.promises.stat(entryPath);
+            if(stats.size>200000)continue;
+            const content=await fs.promises.readFile(entryPath,'utf8');
+            artifacts.push({
+              name:entry.name,path:relPath,fullPath:entryPath,size:stats.size,
+              modifiedAt:stats.mtime.toISOString(),extension:ext.slice(1),content
+            });
+          }catch{}
+        }
+      }
+    };
+    if(root===path.resolve('.')){
+      try{
+        const entries=await fs.promises.readdir(root,{withFileTypes:true});
+        for(const entry of entries){
+          if(entry.isFile()&&/\.(py|md)$/i.test(entry.name)){
+            const entryPath=path.join(root,entry.name);
+            if(!seen.has(entryPath)){
+              seen.add(entryPath);
+              const stats=await fs.promises.stat(entryPath);
+              const content=await fs.promises.readFile(entryPath,'utf8');
+              artifacts.push({name:entry.name,path:entry.name,fullPath:entryPath,size:stats.size,modifiedAt:stats.mtime.toISOString(),extension:path.extname(entry.name).slice(1),content});
+            }
+          }
+        }
+      }catch{}
+    }else{
+      await walk(root);
+    }
+  }
+  artifacts.sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
+  res.json({artifacts});
+});
+
 app.post('/api/coordinator/plans/draft',requireCoordinator,(req,res)=>{
  const parsed=z.object({objective:z.string().trim().min(8).max(5000)}).safeParse(req.body);
  if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});

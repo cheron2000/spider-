@@ -2,7 +2,7 @@ import React,{useCallback,useEffect,useMemo,useState} from 'react';
 import ReactFlow,{Background,Controls,MiniMap,Handle,Position,MarkerType} from 'reactflow';
 import 'reactflow/dist/style.css';
 import {io} from 'socket.io-client';
-import {Activity,Bot,Cloud,Github,GitBranch,RefreshCw,Send,Target,Wifi,ClipboardCheck,History,PlayCircle,CheckCircle2,AlertTriangle,Zap,Settings,Key,Copy,Check} from 'lucide-react';
+import {Activity,Bot,Cloud,Github,GitBranch,RefreshCw,Send,Target,Wifi,ClipboardCheck,History,PlayCircle,CheckCircle2,AlertTriangle,Zap,Settings,Key,Copy,Check,Code} from 'lucide-react';
 import SpiderWeb from './SpiderWeb.jsx';
 import { isCoordinatorAuthenticated, labelState, stateClass } from './dashboardState.js';
 
@@ -106,6 +106,9 @@ export default function App(){
   const [newCredential,setNewCredential]=useState(null);
   const [copied,setCopied]=useState(false);
   const [providerInputs,setProviderInputs]=useState({});
+  const [artifacts,setArtifacts]=useState([]);
+  const [selectedArtifact,setSelectedArtifact]=useState(null);
+  const [copiedFile,setCopiedFile]=useState(null);
 
   const apiFetch=useCallback((url,options={})=>fetch(url,{...options,headers:{...(options.headers||{}),'x-spider-coordinator-key':coordinatorKey}}),[coordinatorKey]);
 
@@ -114,8 +117,11 @@ export default function App(){
 
   const refresh=useCallback(async({silent=true}={})=>{
     try{
-      const urls=['/api/tasks','/api/agents','/api/coordinator/health','/api/events','/api/coordinator/plans?limit=50','/api/coordinator/reviews?limit=100','/api/coordinator/execution-journal?limit=50','/api/providers','/api/coordinator/autopilot'];
-      const [t,a,h,e,p,r,j,prov,ap]=await Promise.all(urls.map(url=>apiFetch(url).then(dataOf)));
+      const urls=['/api/tasks','/api/agents','/api/coordinator/health','/api/events','/api/coordinator/plans?limit=50','/api/coordinator/reviews?limit=100','/api/coordinator/execution-journal?limit=50','/api/providers','/api/coordinator/autopilot','/api/coordinator/artifacts'];
+      const [t,a,h,e,p,r,j,prov,ap,art]=await Promise.all(urls.map(url=>apiFetch(url).then(dataOf)));
+      const loadedArtifacts = art?.artifacts || [];
+      setArtifacts(loadedArtifacts);
+      setSelectedArtifact(old => loadedArtifacts.some(x=>x.fullPath===(old?.fullPath)) ? old : (loadedArtifacts[0] || null));
       setTasks(t.tasks||[]);
       setAgents(a.agents||[]);
       setHealth(h);
@@ -625,6 +631,60 @@ export default function App(){
           )}
         </section>
 
+        
+        <section className="panel artifact-panel">
+          <div className="panel-head">
+            <div>
+              <h2><Code size={16}/> Generated Workspace Files & Code Preview</h2>
+              <p>Direct view of Python scripts, output files, and execution artifacts created by AI agents.</p>
+            </div>
+            <small>{artifacts.length} file(s) found</small>
+          </div>
+
+          {artifacts.length ? (
+            <div className="artifact-viewer">
+              <div className="artifact-list">
+                {artifacts.map(a=>(
+                  <button
+                    key={a.fullPath}
+                    className={'artifact-btn '+(selectedArtifact?.fullPath===a.fullPath?'active':'')}
+                    onClick={()=>setSelectedArtifact(a)}
+                  >
+                    <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:170}}>{a.name}</span>
+                    <span className={'artifact-ext '+a.extension}>.{a.extension}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="artifact-content">
+                {selectedArtifact ? (
+                  <>
+                    <div className="artifact-head">
+                      <div>
+                        <b>{selectedArtifact.name}</b>
+                        <small style={{display:'block',color:'#64748b',fontSize:10}}>{selectedArtifact.fullPath}</small>
+                      </div>
+                      <button
+                        onClick={()=>{
+                          navigator.clipboard.writeText(selectedArtifact.content||'');
+                          setCopiedFile(selectedArtifact.fullPath);
+                          setTimeout(()=>setCopiedFile(null),2000);
+                        }}
+                      >
+                        {copiedFile===selectedArtifact.fullPath?<><Check size={12}/> Copied</>:<><Copy size={12}/> Copy Code</>}
+                      </button>
+                    </div>
+                    <pre className="artifact-code">{selectedArtifact.content||'// File is empty or binary'}</pre>
+                  </>
+                ) : (
+                  <p className="muted">Select a file from the list to preview its code.</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="muted">No workspace files found yet. Run an execution plan to generate code.</p>
+          )}
+        </section>
+
         <section className="panel journal-panel">
           <div className="panel-head">
             <div>
@@ -823,7 +883,24 @@ export default function App(){
               <p className="step-description">{selectedStep.description}</p>
               <div className="evidence-block" style={{marginTop:12}}>
                 <b>Result Summary & Output</b>
-                {selectedStep.resultSummary ? (
+                {artifacts.some(a=>a.extension==='py') && (
+                <div className="evidence-block" style={{marginTop:10,background:'#0f2038',border:'1px solid #38bdf8'}}>
+                  <b style={{color:'#38bdf8'}}>🐍 Python Scripts in Workspace:</b>
+                  {artifacts.filter(a=>a.extension==='py').map(a=>(
+                    <div key={a.fullPath} style={{marginTop:8,paddingTop:6,borderTop:'1px solid #1e293b'}}>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                        <strong style={{color:'#f1f5f9',fontSize:12}}>{a.name}</strong>
+                        <button style={{padding:'2px 7px',fontSize:10}} onClick={()=>{navigator.clipboard.writeText(a.content||'');setCopiedFile(a.fullPath);setTimeout(()=>setCopiedFile(null),2000);}}>
+                          {copiedFile===a.fullPath?'✓ Copied':'Copy Python Code'}
+                        </button>
+                      </div>
+                      <small style={{display:'block',color:'#64748b',fontSize:10}}>{a.fullPath}</small>
+                      <pre style={{marginTop:6,maxHeight:140,overflowY:'auto',fontSize:11}}>{a.content}</pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {selectedStep.resultSummary ? (
                   <pre>{selectedStep.resultSummary}</pre>
                 ) : (
                   <p className="muted" style={{margin:'6px 0'}}>No execution report recorded yet for this step.</p>

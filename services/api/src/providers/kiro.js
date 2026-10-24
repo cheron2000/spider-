@@ -4,8 +4,8 @@ export function createKiroAdapter(){
   return new CommandProviderAdapter({
     id:'kiro',
     label:'Kiro',
-    description:'Kiro CLI chat in non-interactive mode; tool permissions remain provider-controlled.',
-    commandDefault:'kiro-cli',
-    argsFor:prompt=>['chat','--no-interactive',prompt]
+    description:'Kiro CLI chat in agent mode; tool permissions remain provider-controlled.',
+    commandDefault:process.platform==='win32'?'kiro':'kiro-cli',
+    argsFor:prompt=>['chat',prompt]
   });
 }

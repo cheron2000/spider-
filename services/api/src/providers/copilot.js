@@ -6,6 +6,6 @@ export function createCopilotAdapter(){
     label:'Copilot',
     description:'GitHub Copilot CLI in non-interactive prompt mode.',
     commandDefault:'copilot',
-    argsFor:prompt=>['-p',prompt,'--output-format','json','--no-ask-user']
+    argsFor:prompt=>['-p',prompt,'--allow-all-tools','--output-format','json','--no-ask-user']
   });
 }

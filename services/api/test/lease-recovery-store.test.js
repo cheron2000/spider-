@@ -10,7 +10,7 @@ test('lease recovery defers an expired assignment while its provider invocation 
   process.env.SPIDER_DB_PATH = path.join(directory, 'spider.db');
 
   try {
-    const { CoordinationStore } = await import('../src/agentRegistry.js?active-lease-test');
+    const { CoordinationStore, closeDatabase } = await import('../src/agentRegistry.js?active-lease-test');
     const store = new CoordinationStore();
     const now = new Date().toISOString();
     const stepId = 'active-provider-step';
@@ -63,9 +63,12 @@ test('lease recovery defers an expired assignment while its provider invocation 
     assert.equal(recovered[0].step.assignmentToken, null);
     assert.match(recovered[0].step.reviewFeedback, /side effects/i);
   } finally {
+    try {
+      const module = await import('../src/agentRegistry.js?active-lease-test');
+      module.closeDatabase?.();
+    } catch {}
     if (previousDbPath === undefined) delete process.env.SPIDER_DB_PATH;
     else process.env.SPIDER_DB_PATH = previousDbPath;
-    // The test database handle belongs to this short-lived node:test worker.
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 3 });
   }
 });

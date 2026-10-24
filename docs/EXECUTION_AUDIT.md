@@ -52,9 +52,9 @@ Coordination steps persist assignment time, last activity, lease expiry, and a u
 
 The lease sweeper defers an expired step while its provider invocation is still active in the current process. After that invocation exits, the lease is reconciled before any retry can be scheduled. Provider adapter exceptions after a step enters `in_progress` now also mark the step `failed` regardless of remaining attempt budget: an exception does not prove the adapter did not perform external side effects. The failure feedback requires coordinator reconciliation before an explicit retry. Assignment-token fencing still cannot undo external side effects. A retry is safe only after the coordinator reconciles those effects or applies task-specific compensation.
 
-### P1 — Legacy GitHub task state is in memory
+### P1 — Legacy GitHub task state is in memory (RESOLVED — 2026-10-24)
 
-The GitHub task cache is an in-memory `Map`. Sync reconstructs it from GitHub issue metadata, while claims, progress, and completion reports are not independently journaled to SQLite or reliably written back to GitHub. Persist this path or retire it in favor of the durable coordinator DAG.
+**Resolved:** The in-memory `tasks` Map was completely replaced by durable SQLite persistence (`github_issues` table and `GitHubIssueStore` in `agentRegistry.js`). Task metadata, state, claims (`claimed_at`), progress reports (`progress_json`), and completion reports (`completion_report_json`) are now journaled in SQLite and survive server restarts. GitHub sync reconciliations (`issueStore.syncAll`) preserve local claims and progress for active tasks. Comprehensive unit tests added in `services/api/test/github-issue-store.test.js`.
 
 ### P2 — Provider end-to-end compatibility remains unverified
 

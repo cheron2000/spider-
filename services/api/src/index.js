@@ -6,7 +6,7 @@ import {createServer} from 'node:http';
 import {Server} from 'socket.io';
 import {Octokit} from '@octokit/rest';
 import {z} from 'zod';
-import {AgentRegistryStore,AgentMessageStore,CoordinationStore} from './agentRegistry.js';
+import {AgentRegistryStore,AgentMessageStore,CoordinationStore,GitHubIssueStore} from './agentRegistry.js';
 import {createProviderAdapters} from './providers/index.js';
 import {ProviderRuntimeManager} from './providers/runtime.js';
 import {redactSecrets} from './providers/base.js';
@@ -21,9 +21,9 @@ const octokit=process.env.GITHUB_TOKEN?new Octokit({auth:process.env.GITHUB_TOKE
 const agentStore=new AgentRegistryStore();
 const messageStore=new AgentMessageStore();
 const coordinationStore=new CoordinationStore();
+const issueStore=new GitHubIssueStore();
 const assignmentLeaseMs=Math.max(30000,Math.min(3600000,Number.parseInt(process.env.SPIDER_ASSIGNMENT_LEASE_MS||'120000',10)||120000));
 function leaseExpiryFrom(now){return new Date(Date.parse(now)+assignmentLeaseMs).toISOString();}
-const tasks=new Map();
 const agents=new Map(agentStore.list().map(agent=>[agent.id,{...agent,status:'offline',currentTasks:[]}]));
 const events=[];
 const providerRuns=new Set();
@@ -89,17 +89,17 @@ function requireCoordinator(req,res,next){
 }
 function issueTask(i){const labels=(i.labels||[]).map(x=>typeof x==='string'?x:x.name);return{id:'issue-'+i.number,number:i.number,title:i.title,body:i.body||'',url:i.html_url,state:i.state,status:i.state==='closed'?'done':labels.find(x=>x.startsWith('status:'))?.slice(7)||'todo',labels,assigneeAgent:labels.find(x=>x.startsWith('agent:'))?.slice(6)||null,priority:labels.find(x=>x.startsWith('priority:'))?.slice(9)||'medium',updatedAt:i.updated_at};}
 function githubRequired(_q,r,next){if(!octokit||!owner||!repo)return r.status(503).json({error:'Set GITHUB_TOKEN and GITHUB_REPOSITORY in .env.'});next();}
-async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});for(const i of issues)if(!i.pull_request)tasks.set('issue-'+i.number,issueTask(i));emit('github.synced',{repository:owner+'/'+repo,count:tasks.size});return [...tasks.values()];}
+async function sync(){const issues=await octokit.paginate(octokit.issues.listForRepo,{owner,repo,state:'all',per_page:100});const mapped=[];for(const i of issues)if(!i.pull_request)mapped.push(issueTask(i));const stored=issueStore.syncAll(mapped);emit('github.synced',{repository:owner+'/'+repo,count:stored.length});return stored;}
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
-async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);tasks.set(t.id,t);emit('task.created',t);return t;}
+async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);issueStore.upsert(t);emit('task.created',t);return t;}
 app.get('/api/health',(_q,r)=>r.json({ok:true,service:'spider-api'}));
-app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentCredentialMode:'per-agent-sha256-hash',coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:tasks.size,agentCount:agents.size,providers:providerRuntime.list()}));
+app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentCredentialMode:'per-agent-sha256-hash',coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:issueStore.count(),agentCount:agents.size,providers:providerRuntime.list()}));
 app.get('/api/providers',requireCoordinator,(_q,r)=>r.json({providers:providerRuntime.list()}));
 app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
  if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
  res.json({provider:await providerRuntime.refresh(req.params.id,{reset:true})});
 });
-app.get('/api/tasks',requireCoordinator,(_q,r)=>r.json({tasks:[...tasks.values()]}));
+app.get('/api/tasks',requireCoordinator,(_q,r)=>r.json({tasks:issueStore.list()}));
 app.get('/api/agents',requireCoordinator,(_q,r)=>r.json({agents:[...agents.values()]}));
 app.get('/api/events',requireCoordinator,(_q,r)=>r.json({events}));
 app.post('/api/github/sync',requireCoordinator,githubRequired,async(_q,r)=>{try{r.json({tasks:await sync()});}catch(e){r.status(502).json({error:e.message});}});
@@ -767,7 +767,7 @@ app.post('/api/messages',requireMessageAgent,(req,res)=>{
  if(data.fromAgent!==req.spiderAgent.id)return res.status(403).json({error:'fromAgent must match the authenticated x-agent-id.'});
  if(data.fromAgent===data.toAgent)return res.status(400).json({error:'Agents cannot send peer messages to themselves.'});
  if(!agents.has(data.toAgent))return res.status(404).json({error:'Recipient agent is not registered.'});
- if(data.taskId!=='general'&&!tasks.has(data.taskId))return res.status(404).json({error:'Task not found. Use taskId "general" for task-independent coordination.'});
+ if(data.taskId!=='general'&&!issueStore.get(data.taskId))return res.status(404).json({error:'Task not found. Use taskId "general" for task-independent coordination.'});
  if(!agentsArePeers(data.fromAgent,data.toAgent)){
   return res.status(409).json({error:'Recipient is not one of the sender’s four lateral peers.',peerAgentIds:peerAgentIds(data.fromAgent)});
  }
@@ -875,13 +875,14 @@ app.post('/api/agents/:id/heartbeat',requireMessageAgent,(req,res)=>{
  res.json({agent:a});
 });
 app.post('/api/tasks/:id/claim',requireMessageAgent,(req,res)=>{
- const t=tasks.get(req.params.id),a=req.spiderAgent;
+ const t=issueStore.get(req.params.id),a=req.spiderAgent;
  if(!t)return res.status(404).json({error:'Task not found; sync GitHub first.'});
  if(req.body?.agentId&&req.body.agentId!==a.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
  if(a.providerId)return res.status(409).json({error:'Provider-backed agents receive dependency-aware work through the coordinator, not manual GitHub task claims.'});
  if(['done','review','in_progress'].includes(t.status)||t.state==='closed')return res.status(409).json({error:'Task not claimable',status:t.status});
  if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});
  t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();
+ issueStore.upsert(t);
  a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';
  a.lastHeartbeat=new Date().toISOString();agentStore.save(a);
  emit('task.claimed',{task:t,agentId:a.id});
@@ -890,12 +891,13 @@ app.post('/api/tasks/:id/claim',requireMessageAgent,(req,res)=>{
 app.post('/api/tasks/:id/progress',requireMessageAgent,(req,res)=>{
  const parsed=z.object({agentId:z.string().optional(),message:z.string().max(2000).default(''),percent:z.number().finite().min(0).max(100).default(0)}).safeParse(req.body||{});
  if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
- const t=tasks.get(req.params.id),agent=req.spiderAgent;
+ const t=issueStore.get(req.params.id),agent=req.spiderAgent;
  if(!t)return res.status(404).json({error:'Task not found'});
  if(parsed.data.agentId&&parsed.data.agentId!==agent.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
  if(t.assigneeAgent!==agent.id)return res.status(403).json({error:'Task is assigned to another agent or has not been claimed by this agent.'});
  if(t.status!=='in_progress')return res.status(409).json({error:'Progress is only accepted for an in-progress task.',status:t.status});
  t.progress={message:parsed.data.message,percent:parsed.data.percent,at:new Date().toISOString()};
+ issueStore.upsert(t);
  agent.lastHeartbeat=t.progress.at;agentStore.save(agent);
  emit('task.progress',{taskId:t.id,progress:t.progress});
  res.json({task:t});
@@ -903,7 +905,7 @@ app.post('/api/tasks/:id/progress',requireMessageAgent,(req,res)=>{
 app.post('/api/tasks/:id/complete',requireMessageAgent,(req,res)=>{
  const parsed=z.object({agentId:z.string().optional(),summary:z.string().trim().min(1).max(5000),evidence:z.array(z.string().trim().min(1).max(500)).max(30).default([])}).safeParse(req.body||{});
  if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
- const t=tasks.get(req.params.id),agent=req.spiderAgent;
+ const t=issueStore.get(req.params.id),agent=req.spiderAgent;
  if(!t)return res.status(404).json({error:'Task not found'});
  if(parsed.data.agentId&&parsed.data.agentId!==agent.id)return res.status(403).json({error:'agentId must match the authenticated x-agent-id.'});
  if(t.assigneeAgent!==agent.id)return res.status(403).json({error:'Task is assigned to another agent or has not been claimed by this agent.'});
@@ -911,6 +913,7 @@ app.post('/api/tasks/:id/complete',requireMessageAgent,(req,res)=>{
  const now=new Date().toISOString();
  t.completionReport={summary:parsed.data.summary,evidence:parsed.data.evidence,at:now};
  t.status='review';
+ issueStore.upsert(t);
  agent.currentTasks=agent.currentTasks.filter(id=>id!==t.id);
  agent.status=agent.currentTasks.length>=agent.maxConcurrentTasks?'busy':'available';
  agent.lastHeartbeat=now;agentStore.save(agent);
@@ -930,7 +933,7 @@ io.on('connection',s=>{
   s.emit('agent:inbox',{messages:inbox.messages});
   emitMessageDeliveryEvents(inbox.newlyDelivered);
  }
- if(coordinatorAuthorized)s.emit('framework:snapshot',{tasks:[...tasks.values()],agents:[...agents.values()],events});
+ if(coordinatorAuthorized)s.emit('framework:snapshot',{tasks:issueStore.list(),agents:[...agents.values()],events});
  });
 function sweepExpiredAssignmentLeases(){
  try{

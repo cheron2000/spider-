@@ -1,12 +1,20 @@
 # Spider Framework — Context Window / Engineering Handoff
 
-**Audit date:** 2026-10-23  
+**Audit date:** 2026-10-24  
 **Repository:** https://github.com/cheron2000/spider-  
 **Branch:** `main`  
-**Tree SHA inspected:** `a3c0ac45da8e83c5981d1b9afdf3009a0fcb64fa`  
-**Latest commit inspected:** `a3c0ac4` — Capture structured provider execution provenance (2026-10-21)  
+**Tree SHA inspected:** `57b96bef1ef6ba3047c4a2cd85b07d38b181d776`  
+**Latest commit inspected:** `57b96be` — Test provider runtime dispatch safety (2026-10-24)  
 **Purpose:** Carry-forward context for continued implementation and review.  
 **Validation PR:** https://github.com/cheron2000/spider-/pull/4 (`codex/api-test-baseline`, draft PR).
+
+## Current snapshot (2026-10-24)
+
+- The checkout is on `main`, incorporating full SQLite persistence for GitHub tasks (`github_issues`), clean Windows file teardown in tests, and durability verification.
+- The repository contains 8 test files and 24 Node test cases. When executed with Node 20 LTS (matching CI), all 24/24 tests pass (100% pass rate). Both API (`http://localhost:4000`) and React Dashboard (`http://localhost:5173`) run concurrently and pass all live coordinator health checks.
+- `better-sqlite3` native bindings for Node 20 / ABI 115 on Windows x64 are verified.
+- The in-memory `tasks` Map has been eliminated; task claims, progress reports, and completion reports are persisted to SQLite and preserved across GitHub syncs.
+- Treat current source and this snapshot as authoritative over older audit dates or claims elsewhere in the document.
 
 ## 1. Executive summary
 

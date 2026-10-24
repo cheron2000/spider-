@@ -128,10 +128,52 @@ db.exec(`
   CREATE TRIGGER IF NOT EXISTS execution_journal_no_delete BEFORE DELETE ON execution_journal BEGIN
     SELECT RAISE(ABORT, 'execution_journal is append-only');
   END;
+  CREATE TABLE IF NOT EXISTS github_issues (
+    id TEXT PRIMARY KEY,
+    number INTEGER NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'open',
+    status TEXT NOT NULL DEFAULT 'todo',
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    assignee_agent TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    updated_at TEXT NOT NULL,
+    synced_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_github_issues_number ON github_issues(number);
+  CREATE INDEX IF NOT EXISTS idx_github_issues_status ON github_issues(status);
 `);
+
+// Migration: ensure github_issues table exists (may be absent in older databases)
+db.exec(`CREATE TABLE IF NOT EXISTS github_issues (
+  id TEXT PRIMARY KEY,
+  number INTEGER NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'open',
+  status TEXT NOT NULL DEFAULT 'todo',
+  labels_json TEXT NOT NULL DEFAULT '[]',
+  assignee_agent TEXT,
+  priority TEXT NOT NULL DEFAULT 'medium',
+  updated_at TEXT NOT NULL,
+  synced_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_github_issues_number ON github_issues(number);
+CREATE INDEX IF NOT EXISTS idx_github_issues_status ON github_issues(status);`);
 
 const agentRegistryColumns=new Set(db.prepare('PRAGMA table_info(agent_registry)').all().map(column=>column.name));
 if(!agentRegistryColumns.has('credential_hash'))db.exec('ALTER TABLE agent_registry ADD COLUMN credential_hash TEXT');
+const githubIssuesColumns=new Set(db.prepare('PRAGMA table_info(github_issues)').all().map(column=>column.name));
+for(const [name,type] of [
+  ['claimed_at','TEXT'],
+  ['progress_json','TEXT NOT NULL DEFAULT \'{}\''],
+  ['completion_report_json','TEXT NOT NULL DEFAULT \'{}\''],
+]){
+  if(!githubIssuesColumns.has(name))db.exec('ALTER TABLE github_issues ADD COLUMN '+name+' '+type);
+}
 const coordinationStepColumns=new Set(db.prepare('PRAGMA table_info(coordination_steps)').all().map(column=>column.name));
 for(const [name,type] of [
   ['assigned_at','TEXT'],
@@ -502,6 +544,7 @@ const expireStepStatement=db.prepare(`
   AND lease_expires_at IS NOT NULL AND lease_expires_at<=@now
 `);
 
+
 export class CoordinationStore {
   appendExecutionEvent(event){
     insertExecutionEventStatement.run({
@@ -658,4 +701,121 @@ export class CoordinationStore {
     return recover();
   }
 }
+
+function fromGitHubIssueRow(row){
+  if(!row) return null;
+  const progress = parseJson(row.progress_json, null);
+  const completionReport = parseJson(row.completion_report_json, null);
+  return {
+    id: row.id,
+    number: row.number,
+    title: row.title,
+    body: row.body,
+    url: row.url,
+    state: row.state,
+    status: row.status,
+    labels: parseJson(row.labels_json, []),
+    assigneeAgent: row.assignee_agent,
+    priority: row.priority,
+    claimedAt: row.claimed_at || null,
+    ...(progress && Object.keys(progress).length ? {progress} : {}),
+    ...(completionReport && Object.keys(completionReport).length ? {completionReport} : {}),
+    updatedAt: row.updated_at,
+    syncedAt: row.synced_at
+  };
+}
+
+const insertOrUpdateGitHubIssueStatement = db.prepare(`
+  INSERT INTO github_issues (
+    id, number, title, body, url, state, status, labels_json, assignee_agent, priority, claimed_at, progress_json, completion_report_json, updated_at, synced_at
+  ) VALUES (
+    @id, @number, @title, @body, @url, @state, @status, @labelsJson, @assigneeAgent, @priority, @claimedAt, @progressJson, @completionReportJson, @updatedAt, @syncedAt
+  ) ON CONFLICT(id) DO UPDATE SET
+    number = excluded.number,
+    title = excluded.title,
+    body = excluded.body,
+    url = excluded.url,
+    state = excluded.state,
+    status = excluded.status,
+    labels_json = excluded.labels_json,
+    assignee_agent = excluded.assignee_agent,
+    priority = excluded.priority,
+    claimed_at = excluded.claimed_at,
+    progress_json = excluded.progress_json,
+    completion_report_json = excluded.completion_report_json,
+    updated_at = excluded.updated_at,
+    synced_at = excluded.synced_at
+`);
+
+const findGitHubIssueByIdStatement = db.prepare('SELECT * FROM github_issues WHERE id = ?');
+const findGitHubIssueByNumberStatement = db.prepare('SELECT * FROM github_issues WHERE number = ?');
+const listGitHubIssuesStatement = db.prepare('SELECT * FROM github_issues ORDER BY number ASC');
+const countGitHubIssuesStatement = db.prepare('SELECT COUNT(*) AS count FROM github_issues');
+
+export class GitHubIssueStore {
+  upsert(task, syncedAt = new Date().toISOString()) {
+    insertOrUpdateGitHubIssueStatement.run({
+      id: task.id || `issue-${task.number}`,
+      number: task.number,
+      title: task.title,
+      body: task.body || '',
+      url: task.url || task.html_url || '',
+      state: task.state || 'open',
+      status: task.status || (task.state === 'closed' ? 'done' : 'todo'),
+      labelsJson: JSON.stringify(task.labels || []),
+      assigneeAgent: task.assigneeAgent || null,
+      priority: task.priority || 'medium',
+      claimedAt: task.claimedAt || null,
+      progressJson: JSON.stringify(task.progress || {}),
+      completionReportJson: JSON.stringify(task.completionReport || {}),
+      updatedAt: task.updatedAt || task.updated_at || new Date().toISOString(),
+      syncedAt
+    });
+    return this.get(task.id || `issue-${task.number}`);
+  }
+
+  syncAll(tasks, syncedAt = new Date().toISOString()) {
+    const syncTx = db.transaction((items) => {
+      for (const item of items) {
+        const existing = this.get(item.id || `issue-${item.number}`);
+        if (existing) {
+          if (existing.claimedAt && !item.claimedAt) item.claimedAt = existing.claimedAt;
+          if (existing.assigneeAgent && !item.assigneeAgent) item.assigneeAgent = existing.assigneeAgent;
+          if (existing.progress && !item.progress) item.progress = existing.progress;
+          if (existing.completionReport && !item.completionReport) item.completionReport = existing.completionReport;
+          if (existing.status !== 'todo' && item.status === 'todo' && item.state !== 'closed') {
+            item.status = existing.status;
+          }
+        }
+        this.upsert(item, syncedAt);
+      }
+      return this.list();
+    });
+    return syncTx(tasks);
+  }
+
+  get(idOrNumber) {
+    if (typeof idOrNumber === 'number' || /^\d+$/.test(idOrNumber)) {
+      return fromGitHubIssueRow(findGitHubIssueByNumberStatement.get(Number(idOrNumber)));
+    }
+    return fromGitHubIssueRow(findGitHubIssueByIdStatement.get(idOrNumber));
+  }
+
+  list() {
+    return listGitHubIssuesStatement.all().map(fromGitHubIssueRow);
+  }
+
+  count() {
+    return countGitHubIssuesStatement.get().count;
+  }
+}
+
+export function closeDatabase() {
+  try {
+    if (db.open) db.close();
+  } catch {}
+}
+
+export { db };
+
 

@@ -62,10 +62,11 @@ export function cliPrompt(work) {
 }
 
 export function extractCliText(stdout) {
-  const raw = boundedText(stdout, 50000);
+  const raw = boundedText(stdout, 200000);
   if (!raw) return '';
   const lines = raw.split(/\r?\n/).filter(Boolean);
   const records = [];
+  const deltas = [];
   for (const line of lines) {
     try {
       const item = JSON.parse(line);
@@ -77,12 +78,16 @@ export function extractCliText(stdout) {
         if (typeof content === 'string') records.push(content);
         else if (Array.isArray(content)) records.push(content.map(part => typeof part === 'string' ? part : part?.text || part?.content || '').filter(Boolean).join('\n'));
       }
+      else if (item?.type === 'assistant.message_delta' && typeof item?.data?.deltaContent === 'string') {
+        deltas.push(item.data.deltaContent);
+      }
       else if (item?.type === 'assistant' && typeof item?.content === 'string') records.push(item.content);
       else if (item?.response && typeof item.response === 'string') records.push(item.response);
     } catch {
       // Plain-text CLIs and mixed diagnostic output are retained as-is below.
     }
   }
+  if (deltas.length) records.push(deltas.join(''));
   const normalized = records.length ? records.join('\n\n') : raw;
   return redactSecrets(normalized).slice(-5000);
 }
@@ -118,7 +123,7 @@ export function inspectCliOutcome(stdout) {
 
 export function runProcess(command, args, options={}) {
   const {
-    cwd, env={}, timeoutMs=300000, maxOutputChars=50000
+    cwd, env={}, timeoutMs=300000, maxOutputChars=200000
   } = options;
   return new Promise((resolve,reject)=>{
     let child;

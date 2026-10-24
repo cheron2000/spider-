@@ -28,6 +28,7 @@ const agents=new Map(agentStore.list().map(agent=>[agent.id,{...agent,status:'of
 const events=[];
 const providerRuns=new Set();
 const pendingProviderAssignments=new Map();
+let autoPilotEnabled=process.env.SPIDER_AUTOPILOT_ENABLED==='true';
 const providerRuntime=new ProviderRuntimeManager(createProviderAdapters(),{
  onStateChange:handleProviderStateChange,
  pollIntervalMs:Math.max(10000,Math.min(120000,Number.parseInt(process.env.SPIDER_PROVIDER_POLL_INTERVAL_MS||'30000',10)||30000))
@@ -93,11 +94,41 @@ async function sync(){const issues=await octokit.paginate(octokit.issues.listFor
 async function ensureLabel(name){try{await octokit.issues.getLabel({owner,repo,name});}catch(e){if(e.status!==404)throw e;await octokit.issues.createLabel({owner,repo,name,color:name==='type:epic'?'6f42c1':name==='priority:high'?'d93f0b':'1f6feb',description:'Managed by Universal Agent Framework'});}}
 async function createIssue(title,body,labels=['agent-task']){for(const label of labels)await ensureLabel(label);const {data}=await octokit.issues.create({owner,repo,title,body,labels});const t=issueTask(data);issueStore.upsert(t);emit('task.created',t);return t;}
 app.get('/api/health',(_q,r)=>r.json({ok:true,service:'spider-api'}));
-app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentCredentialMode:'per-agent-sha256-hash',coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:issueStore.count(),agentCount:agents.size,providers:providerRuntime.list()}));
+app.get('/api/coordinator/health',requireCoordinator,(_q,r)=>r.json({ok:true,repository:owner&&repo?owner+'/'+repo:null,githubConfigured:!!octokit,agentPersistence:'sqlite',messagePersistence:'sqlite',agentCredentialMode:'per-agent-sha256-hash',coordinatorEnabled:configuredSecret(process.env.SPIDER_COORDINATOR_API_KEY),taskCount:issueStore.count(),agentCount:agents.size,providers:providerRuntime.list(),autoPilotEnabled}));
+app.get('/api/coordinator/autopilot',requireCoordinator,(_q,r)=>r.json({enabled:autoPilotEnabled}));
+app.post('/api/coordinator/autopilot',requireCoordinator,(req,res)=>{
+ const parsed=z.object({enabled:z.boolean()}).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ autoPilotEnabled=parsed.data.enabled;
+ emit('coordination.autopilot.changed',{enabled:autoPilotEnabled});
+ if(autoPilotEnabled)advanceOtherCoordinationPlans(null);
+ res.json({enabled:autoPilotEnabled});
+});
 app.get('/api/providers',requireCoordinator,(_q,r)=>r.json({providers:providerRuntime.list()}));
 app.post('/api/coordinator/providers/:id/refresh',requireCoordinator,async(req,res)=>{
  if(!providerRuntime.adapter(req.params.id))return res.status(404).json({error:'Unknown provider adapter.'});
  res.json({provider:await providerRuntime.refresh(req.params.id,{reset:true})});
+});
+app.post('/api/coordinator/providers/:id/configure',requireCoordinator,async(req,res)=>{
+ const adapter=providerRuntime.adapter(req.params.id);
+ if(!adapter)return res.status(404).json({error:'Unknown provider adapter.'});
+ const parsed=z.object({
+  enabled:z.boolean().optional(),
+  apiKey:z.string().trim().optional(),
+  workspace:z.string().trim().optional()
+ }).safeParse(req.body);
+ if(!parsed.success)return res.status(400).json({error:parsed.error.flatten()});
+ const {enabled,apiKey,workspace}=parsed.data;
+ const prefix='SPIDER_'+req.params.id.replace(/-/g,'_').toUpperCase();
+ if(enabled!==undefined)process.env[prefix+'_ENABLED']=enabled?'true':'false';
+ if(workspace)process.env[prefix+'_WORKSPACE']=workspace;
+ if(apiKey){
+  if(req.params.id==='manus')process.env.MANUS_API_KEY=apiKey;
+  else process.env[prefix+'_API_KEY']=apiKey;
+ }
+ const refreshed=await providerRuntime.refresh(req.params.id,{reset:true});
+ emit('provider.configured',{providerId:req.params.id,enabled,status:refreshed.status});
+ res.json({provider:refreshed});
 });
 app.get('/api/tasks',requireCoordinator,(_q,r)=>r.json({tasks:issueStore.list()}));
 app.get('/api/agents',requireCoordinator,(_q,r)=>r.json({agents:[...agents.values()]}));
@@ -393,6 +424,27 @@ function releaseProviderWork(agentId,stepId){
  agentStore.save(agent);
 }
 
+function applyReviewDecision(stepId,decision,feedback){
+ const step=coordinationStore.getStep(stepId);
+ if(!step||step.status!=='review')return null;
+ const currentPlan=coordinationStore.getPlan(step.planId);
+ const currentReport=currentPlan?.steps.find(item=>item.id===step.id)?.reports.find(report=>report.attempt===step.attempts);
+ if(!currentReport||currentReport.reviewDecision)return null;
+ const now=new Date().toISOString();
+ coordinationStore.reviewReport(step.id,step.attempts,decision,feedback,now);
+ const approved=decision==='approve';
+ const exhausted=!approved&&step.attempts>=step.maxAttempts;
+ const status=approved?'done':exhausted?'failed':'ready';
+ const reviewedStep=coordinationStore.updateStep({
+  ...step,status,assignedAgent:approved?step.assignedAgent:null,
+  reviewFeedback:feedback,reviewedAt:now,updatedAt:now
+ });
+ emit('coordination.step.reviewed',{planId:step.planId,stepId:step.id,key:step.key,decision,agentId:step.assignedAgent,attempt:step.attempts});
+ const scheduling=advanceCoordinationPlan(step.planId);
+ advanceOtherCoordinationPlans(step.planId);
+ return {reviewedStep,scheduling};
+}
+
 async function executeProviderAssignment(agentId,assignment){
  const runKey=assignment.stepId;
  if(providerRuns.has(runKey)){
@@ -453,6 +505,9 @@ async function executeProviderAssignment(agentId,assignment){
    providerId:agent.providerId,providerSuccess:result.success,
    provenance:provenanceRecord
   });
+  if(autoPilotEnabled&&result.success===true){
+   applyReviewDecision(latest.id,'approve','Auto-approved by Spider Auto-Pilot (clean zero-exit execution report).');
+  }
   return submitted;
  }catch(error){
   const latest=coordinationStore.getStep(assignment.stepId);
@@ -725,22 +780,9 @@ app.post('/api/coordinator/steps/:id/review',requireCoordinator,(req,res)=>{
  const step=coordinationStore.getStep(req.params.id);
  if(!step)return res.status(404).json({error:'Coordination step not found.'});
  if(step.status!=='review')return res.status(409).json({error:'Step is not awaiting review.',status:step.status});
- const currentPlan=coordinationStore.getPlan(step.planId);
- const currentReport=currentPlan?.steps.find(item=>item.id===step.id)?.reports.find(report=>report.attempt===step.attempts);
- if(!currentReport||currentReport.reviewDecision)return res.status(409).json({error:'The current attempt has already been reviewed or has no report.'});
- const now=new Date().toISOString();
- coordinationStore.reviewReport(step.id,step.attempts,parsed.data.decision,parsed.data.feedback,now);
- const approved=parsed.data.decision==='approve';
- const exhausted=!approved&&step.attempts>=step.maxAttempts;
- const status=approved?'done':exhausted?'failed':'ready';
- const reviewedStep=coordinationStore.updateStep({
-  ...step,status,assignedAgent:approved?step.assignedAgent:null,
-  reviewFeedback:parsed.data.feedback,reviewedAt:now,updatedAt:now
- });
- emit('coordination.step.reviewed',{planId:step.planId,stepId:step.id,key:step.key,decision:parsed.data.decision,agentId:step.assignedAgent,attempt:step.attempts});
- const scheduling=advanceCoordinationPlan(step.planId);
- advanceOtherCoordinationPlans(step.planId);
- res.json({step:serializeCoordinationStep(reviewedStep),plan:serializeCoordinationPlan(scheduling.plan),assigned:scheduling.assigned,unassigned:scheduling.unassigned});
+ const result=applyReviewDecision(step.id,parsed.data.decision,parsed.data.feedback);
+ if(!result)return res.status(409).json({error:'The current attempt has already been reviewed or has no report.'});
+ res.json({step:serializeCoordinationStep(result.reviewedStep),plan:serializeCoordinationPlan(result.scheduling.plan),assigned:result.scheduling.assigned,unassigned:result.scheduling.unassigned});
 });
 app.get('/api/topology',requireCoordinator,(_q,r)=>{
  const registered=[...agents.values()].map(a=>({...a}));

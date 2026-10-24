@@ -881,8 +881,9 @@ app.post('/api/tasks/:id/claim',requireMessageAgent,(req,res)=>{
  if(a.providerId)return res.status(409).json({error:'Provider-backed agents receive dependency-aware work through the coordinator, not manual GitHub task claims.'});
  if(['done','review','in_progress'].includes(t.status)||t.state==='closed')return res.status(409).json({error:'Task not claimable',status:t.status});
  if(a.currentTasks.length>=a.maxConcurrentTasks)return res.status(409).json({error:'Concurrency limit reached'});
- t.status='in_progress';t.assigneeAgent=a.id;t.claimedAt=new Date().toISOString();
- issueStore.upsert(t);
+ const claimedTask=issueStore.claim(t.id,a.id,new Date().toISOString());
+ if(!claimedTask)return res.status(409).json({error:'Task was claimed or became unavailable before this claim could be committed.'});
+ Object.assign(t,claimedTask);
  a.currentTasks.push(t.id);a.status=a.currentTasks.length>=a.maxConcurrentTasks?'busy':'available';
  a.lastHeartbeat=new Date().toISOString();agentStore.save(a);
  emit('task.claimed',{task:t,agentId:a.id});

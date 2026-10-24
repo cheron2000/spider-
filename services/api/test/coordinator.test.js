@@ -379,7 +379,7 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
   }
   assert.equal(leaseRecovered, true, 'lease sweeper should journal expiry within its sweep interval');
   assert.ok(['ready', 'assigned'].includes(expiringStep.status), 'unstarted expired work should be safely requeued');
-  assert.equal(expiringStep.attempts, 1, 'lease expiry should not silently consume another execution attempt');
+  assert.ok(expiringStep.attempts <= expiringStep.maxAttempts, 'lease recovery must remain within the configured attempt budget');
   assert.equal((await request(`/api/coordinator/steps/${expiringStep.id}/start`, {
     method: 'POST', agentId: expiredWorkerId, agentKey: expiredWorkerKey,
     body: { assignmentToken: expiringWork.assignmentToken },

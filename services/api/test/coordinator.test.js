@@ -273,6 +273,37 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
   assert.equal(root.reports.length, 1, 'report should persist with the step submission');
   assert.equal(root.reports[0].summary, 'Root implementation report');
 
+  // Peer review is restricted to lateral peers, cannot be self-authored, and is advisory.
+  const peerReviewPayload = {
+    decision: 'approve',
+    feedback: 'Peer review confirms the submitted evidence is relevant.',
+    evidence: ['test:peer-review-evidence'],
+  };
+  assert.equal((await request(`/api/coordinator/steps/${root.id}/peer-review`, {
+    method: 'POST', agentId: WORKER_ID, agentKey: workerKey, body: peerReviewPayload,
+  })).status, 403, 'an author must not review their own step');
+  const nonPeerId = [...workerCredentials.keys()].find(id =>
+    id !== WORKER_ID && !(topology.peerMap[WORKER_ID] || []).includes(id)
+  );
+  if (nonPeerId) {
+    assert.equal((await request(`/api/coordinator/steps/${root.id}/peer-review`, {
+      method: 'POST', agentId: nonPeerId, agentKey: workerCredentials.get(nonPeerId), body: peerReviewPayload,
+    })).status, 403, 'a non-peer must not review the author\'s step');
+  }
+  const peerReviewResponse = await request(`/api/coordinator/steps/${root.id}/peer-review`, {
+    method: 'POST', agentId: peerId, agentKey: workerCredentials.get(peerId), body: peerReviewPayload,
+  });
+  assert.equal(peerReviewResponse.status, 201, 'a lateral peer should be allowed to submit feedback');
+  assert.equal((await responseJson(peerReviewResponse)).review.decision, 'approve');
+  assert.equal((await request(`/api/coordinator/steps/${root.id}/peer-review`, {
+    method: 'POST', agentId: peerId, agentKey: workerCredentials.get(peerId), body: peerReviewPayload,
+  })).status, 409, 'a peer may only review the current attempt once');
+  plan = (await responseJson(await request(`/api/coordinator/plans/${planId}`))).plan;
+  root = plan.steps.find(step => step.key === 'root');
+  child = plan.steps.find(step => step.key === 'child');
+  assert.equal(root.status, 'review', 'peer approval must not replace coordinator approval');
+  assert.equal(child.status, 'blocked', 'peer approval must not unlock dependent work');
+
   // A repeated submit with the same assignment token must not create a second report.
   const duplicateSubmission = await request(`/api/coordinator/steps/${root.id}/submit`, {
     method: 'POST',

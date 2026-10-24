@@ -272,6 +272,24 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
   assert.equal(root.status, 'review');
   assert.equal(root.reports.length, 1, 'report should persist with the step submission');
   assert.equal(root.reports[0].summary, 'Root implementation report');
+
+  // A repeated submit with the same assignment token must not create a second report.
+  const duplicateSubmission = await request(`/api/coordinator/steps/${root.id}/submit`, {
+    method: 'POST',
+    agentId: WORKER_ID,
+    agentKey: workerKey,
+    body: {
+      assignmentToken: rootWork.assignmentToken,
+      summary: 'Duplicate report must be rejected',
+      evidence: ['test:duplicate-evidence'],
+    },
+  });
+  assert.equal(duplicateSubmission.status, 409, 'a step awaiting review must reject duplicate submissions');
+  plan = (await responseJson(await request(`/api/coordinator/plans/${planId}`))).plan;
+  root = plan.steps.find(step => step.key === 'root');
+  child = plan.steps.find(step => step.key === 'child');
+  assert.equal(root.reports.length, 1, 'duplicate submission must not create a second attempt report');
+  assert.equal(root.reports[0].summary, 'Root implementation report', 'the accepted report must remain unchanged');
   assert.equal(child.status, 'blocked', 'submission must not unlock dependants before approval');
 
   // Coordinator approval alone unlocks the child.

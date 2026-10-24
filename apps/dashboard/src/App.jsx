@@ -10,7 +10,7 @@ const timeLabel=s=>s?new Date(s).toLocaleString([],{month:'short',day:'numeric',
 
 function TaskNode({data}){
   return (
-    <div className={'task-node '+(data.root?'root-node ':'')+stateClass(data.status)}>
+    <div className={'task-node '+(data.root?'root-node ':'')+(data.selected?'selected ':'')+stateClass(data.status)}>
       <Handle type="target" position={Position.Top}/>
       <div className="node-top">
         <Target size={13}/>
@@ -29,14 +29,14 @@ function TaskNode({data}){
 
 const TASK_NODE_TYPES={task:TaskNode};
 
-function makeGraph(plan){
+function makeGraph(plan,selectedStepId){
   if(!plan?.steps?.length)return{nodes:[],edges:[]};
   const byKey=new Map(plan.steps.map(s=>[s.key,s]));
   const nodes=plan.steps.map((s,i)=>({
     id:s.id,
     type:'task',
     position:{x:(i%3)*290,y:Math.floor(i/3)*175},
-    data:{label:s.title,status:s.status,root:i===0,index:i,agent:s.assignedAgentName||s.assignedAgent||null}
+    data:{label:s.title,status:s.status,root:i===0,index:i,agent:s.assignedAgentName||s.assignedAgent||null,selected:s.id===selectedStepId}
   }));
   const edges=[];
   for(const s of plan.steps){
@@ -85,6 +85,7 @@ export default function App(){
   const [notice,setNotice]=useState('Enter the coordinator API key to load execution data.');
   const [selectedPlanId,setSelectedPlanId]=useState('');
   const [selectedStepId,setSelectedStepId]=useState('');
+  const [stepModalOpen,setStepModalOpen]=useState(false);
   const [reviewFeedback,setReviewFeedback]=useState('');
   const [reviewModal,setReviewModal]=useState(null);
   const [retryModal,setRetryModal]=useState(false);
@@ -173,7 +174,7 @@ export default function App(){
     }
   },[selectedPlan,selectedStepId]);
 
-  const graph=useMemo(()=>makeGraph(selectedPlan),[selectedPlan]);
+  const graph=useMemo(()=>makeGraph(selectedPlan,selectedStepId),[selectedPlan,selectedStepId]);
   const counts={
     total:plans.length,
     active:plans.filter(p=>p.status==='active').length,
@@ -287,7 +288,12 @@ export default function App(){
 
   const onNodeClick=useCallback((_,n)=>{
     setSelectedStepId(n.id);
+    setStepModalOpen(true);
     setReviewFeedback('');
+    try{
+      const el=document.getElementById('selected-step-details');
+      if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
+    }catch{}
   },[]);
 
   const currentReview=reviews.find(x=>x.step?.id===selectedStep?.id);
@@ -544,7 +550,7 @@ export default function App(){
           </div>
         </section>
 
-        <section className="panel detail-panel">
+        <section className="panel detail-panel" id="selected-step-details">
           <div className="panel-head">
             <div>
               <h2><ClipboardCheck size={16}/> Selected step details</h2>
@@ -800,6 +806,61 @@ export default function App(){
           </form>
         </div>
       )}
+
+      {stepModalOpen && selectedStep && (
+        <div className="overlay" onClick={()=>setStepModalOpen(false)}>
+          <div className="modal" style={{maxWidth:680}} onClick={e=>e.stopPropagation()}>
+            <button className="close" onClick={()=>setStepModalOpen(false)}>×</button>
+            <small className="eyebrow">DAG NODE INSPECTION · {String(selectedStep.key||'STEP').toUpperCase()}</small>
+            <h2>{selectedStep.title}</h2>
+            <div className="step-modal-grid">
+              <div><small>STATUS</small><span className={'status-pill '+stateClass(selectedStep.status)}>{labelState(selectedStep.status)}</span></div>
+              <div><small>ASSIGNED WORKER</small><b>{selectedStep.assignedAgentName||selectedStep.assignedAgent||'Unassigned'}</b></div>
+              <div><small>ATTEMPT</small><b>{selectedStep.attempts} of {selectedStep.maxAttempts}</b></div>
+              <div><small>LEASE EXPIRY</small><b>{timeLabel(selectedStep.leaseExpiresAt)}</b></div>
+            </div>
+            <div className="step-modal-body">
+              <p className="step-description">{selectedStep.description}</p>
+              <div className="evidence-block" style={{marginTop:12}}>
+                <b>Result Summary & Output</b>
+                {selectedStep.resultSummary ? (
+                  <pre>{selectedStep.resultSummary}</pre>
+                ) : (
+                  <p className="muted" style={{margin:'6px 0'}}>No execution report recorded yet for this step.</p>
+                )}
+              </div>
+              {(selectedStep.evidence||[]).length>0 && (
+                <div className="evidence-block" style={{marginTop:10}}>
+                  <b>Output Evidence & Artifacts</b>
+                  <ul style={{margin:'6px 0 0',paddingLeft:18}}>
+                    {selectedStep.evidence.map((x,i)=><li key={i}><code style={{fontSize:11}}>{x}</code></li>)}
+                  </ul>
+                </div>
+              )}
+              {selectedStep.reviewFeedback && (
+                <div className="evidence-block" style={{marginTop:10}}>
+                  <b>Review Feedback</b>
+                  <p className="feedback-text">{selectedStep.reviewFeedback}</p>
+                </div>
+              )}
+            </div>
+            <div className="modal-actions" style={{marginTop:14}}>
+              {selectedStep.status==='review' && (
+                <button className="primary" onClick={()=>{setStepModalOpen(false);setReviewModal('approve');}}>
+                  <CheckCircle2 size={14}/> Approve Report
+                </button>
+              )}
+              {selectedStep.status==='failed' && (
+                <button className="danger" onClick={()=>{setStepModalOpen(false);setRetryReason('');setRetryReconciled(false);setRetryModal(true);}}>
+                  Review & Retry…
+                </button>
+              )}
+              <button onClick={()=>setStepModalOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

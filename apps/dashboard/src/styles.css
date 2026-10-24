@@ -14,3 +14,13 @@
 
 
 .key-actions{display:flex;gap:7px;flex-wrap:wrap;margin:-7px 0 16px}.key-actions button{flex:1;min-width:100px}.key-actions button:disabled{opacity:.5;cursor:not-allowed}
+
+.task-node{cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
+.task-node:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,.4),0 0 0 2px rgba(56,189,248,.35)}
+.task-node.selected{border-color:#38bdf8 !important;box-shadow:0 0 0 3px rgba(56,189,248,.5),0 12px 28px rgba(0,0,0,.5) !important;transform:translateY(-2px) scale(1.02)}
+.step-modal-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;background:#0b1322;padding:12px;border-radius:8px;margin:12px 0;border:1px solid #1e293b}
+.step-modal-grid small{color:#64748b;font-size:10px;display:block}
+.step-modal-grid b{color:#f1f5f9;font-size:13px}
+.step-modal-body{max-height:500px;overflow-y:auto;padding-right:6px}
+.step-modal-body pre{background:#080e18;padding:12px;border-radius:6px;font-size:12px;color:#cbd5e1;white-space:pre-wrap;word-break:break-word;border:1px solid #1e293b}
+

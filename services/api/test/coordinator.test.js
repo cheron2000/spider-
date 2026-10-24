@@ -344,7 +344,10 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
     method: 'POST',
     body: {
       objective: 'Verify expired unstarted lease recovery',
-      steps: [{ key: 'lease-expiry', title: 'Lease expiry test', description: 'Unstarted work', maxAttempts: 2 }],
+      steps: [
+        { key: 'lease-expiry', title: 'Lease expiry test', description: 'Unstarted work', maxAttempts: 2 },
+        { key: 'blocked-child', title: 'Blocked child', description: 'Must remain blocked until lease step is approved', dependsOn: ['lease-expiry'] },
+      ],
     },
   });
   assert.equal(expiringPlanResponse.status, 201);

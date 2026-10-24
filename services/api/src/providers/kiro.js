@@ -5,7 +5,7 @@ export function createKiroAdapter(){
     id:'kiro',
     label:'Kiro',
     description:'Kiro CLI chat in non-interactive mode; tool permissions remain provider-controlled.',
-    commandDefault:'kiro-cli',
-    argsFor:prompt=>['chat','--no-interactive',prompt]
+    commandDefault:'F:\\\\Kiro\\\\bin\\\\kiro.cmd',
+    argsFor:prompt=>['chat',prompt]
   });
 }

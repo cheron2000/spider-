@@ -395,6 +395,44 @@ test('coordinator DAG enforces authorization, dependency gates, token fencing, r
     assert.equal(expiringStep.status, 'ready', 'work without an assignee must remain queued');
   }
 
+  // Exhausted unstarted leases must fail closed rather than requeue forever.
+  const exhaustedPlanResponse = await request('/api/coordinator/plans', {
+    method: 'POST',
+    body: {
+      objective: 'Verify exhausted lease recovery',
+      steps: [
+        { key: 'exhausted', title: 'Exhausted lease', description: 'Attempt budget already consumed', maxAttempts: 1 },
+        { key: 'exhausted-child', title: 'Blocked child', description: 'Must remain blocked', dependsOn: ['exhausted'] },
+      ],
+    },
+  });
+  assert.equal(exhaustedPlanResponse.status, 201);
+  const exhaustedPlan = (await responseJson(exhaustedPlanResponse)).plan;
+  let exhaustedStep = exhaustedPlan.steps.find(step => step.key === 'exhausted');
+  assert.equal(exhaustedStep.status, 'assigned');
+  testDb.prepare("UPDATE coordination_steps SET attempts = max_attempts, lease_expires_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 1000).toISOString(), exhaustedStep.id);
+
+  const exhaustedDeadline = Date.now() + 12000;
+  let exhaustedRecovered = false;
+  while (Date.now() < exhaustedDeadline) {
+    const latestPlan = (await responseJson(await request(`/api/coordinator/plans/${exhaustedPlan.id}`))).plan;
+    exhaustedStep = latestPlan.steps.find(step => step.id === exhaustedStep.id);
+    const journalResponse = await request(`/api/coordinator/execution-journal?planId=${encodeURIComponent(exhaustedPlan.id)}&limit=100`);
+    const leaseJournal = await responseJson(journalResponse);
+    if (leaseJournal.events.some(event =>
+      event.eventType === 'coordination.step.lease_expired' && event.stepId === exhaustedStep.id
+    )) {
+      exhaustedRecovered = true;
+      break;
+    }
+    await sleep(250);
+  }
+  assert.equal(exhaustedRecovered, true, 'exhausted lease expiry should be journaled');
+  assert.equal(exhaustedStep.status, 'failed', 'exhausted work must fail rather than requeue');
+  assert.equal(exhaustedStep.assignedAgent, null);
+  assert.match(exhaustedStep.reviewFeedback, /lease expired before execution/i);
+
   // Restart with a step in progress: it must fail closed pending coordinator reconciliation.
   await stopApi();
   await startApi();

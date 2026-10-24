@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   boundedTimeout,
   extractCliText,
+  runProcess,
   inspectCliOutcome,
   redactSecrets,
   safeChildEnv,
@@ -78,4 +79,31 @@ test('inspectCliOutcome recognizes nested failed run records', () => {
   }));
   assert.equal(result.failed, true);
   assert.match(result.reason, /invalid response/i);
+});
+
+
+test('runProcess terminates a long-running child when its timeout expires', { timeout: 10000 }, async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    runProcess(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: 100,
+      maxOutputChars: 1000,
+    }),
+    /Provider CLI timed out and was terminated\./,
+  );
+  assert.ok(Date.now() - startedAt < 5000, 'timed-out child should be terminated promptly');
+});
+
+test('runProcess captures nonzero exits without treating them as spawn failures', async () => {
+  const result = await runProcess(process.execPath, ['-e', 'process.stdout.write("partial output"); process.exit(7)'], {
+    cwd: process.cwd(),
+    env: process.env,
+    timeoutMs: 2000,
+    maxOutputChars: 1000,
+  });
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, 'partial output');
 });

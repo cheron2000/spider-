@@ -8,3 +8,4 @@ services/api/data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+workspaces/
